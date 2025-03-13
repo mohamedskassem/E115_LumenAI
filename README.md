@@ -99,12 +99,15 @@ Each application variant follows a similar structure with its own specific imple
 
 Each application variant includes:
 
+```
+.
 ├── app.py              # Main application logic
 ├── Dockerfile         # Container configuration
 ├── Pipfile           # Python dependencies
 ├── dockershell.sh    # Docker run script
 ├── secrets/          # API keys and credentials
 └── output/           # Database and output files
+```
 
 ### Running Instructions
 
