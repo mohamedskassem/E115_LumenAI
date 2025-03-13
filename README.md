@@ -1,56 +1,59 @@
 # Project Structure
 
+```
 ├── README.md
-├── data/ 
-│ ├── AdventureWorks_Calendar.csv # Date records (2015-2017)
-│ ├── AdventureWorks_Customers.csv # Customer information (1.9MB)
-│ ├── AdventureWorks_Product_Categories.csv # Product category listings (83B)
-│ ├── AdventureWorks_Product_Subcategories.csv # Product subcategories (637B)
-│ ├── AdventureWorks_Products.csv # Product details (57KB)
-│ ├── AdventureWorks_Returns.csv # Product returns data (34KB)
-│ ├── AdventureWorks_Sales_2015.csv # Sales records for 2015 (116KB)
-│ ├── AdventureWorks_Sales_2016.csv # Sales records for 2016 (1.0MB)
-│ ├── AdventureWorks_Sales_2017.csv # Sales records for 2017 (1.3MB)
-│ └── AdventureWorks_Territories.csv # Sales territories (400B)
-├── reports/
-│ ├── M2_Report.pdf
-│ └── Statement_of_Work.pdf
-└── src/
-├── app/ # Application implementations
-│ ├── LumenAI/ # Base OpenAI implementation
-│ │ ├── app.py # Main application logic
-│ │ ├── Dockerfile
-│ │ ├── Pipfile
-│ │ ├── dockershell.sh
-│ │ ├── secrets/ # API keys
-│ │ └── output/ # Database files
-│ ├── LumenAI_Advanced/ # Enhanced implementation
-│ │ ├── app.py
-│ │ ├── Dockerfile
-│ │ ├── Pipfile
-│ │ ├── dockershell.sh
-│ │ ├── secrets/
-│ │ └── output/
-│ ├── LumenAI_Deepseek_Local/ # Local model implementation
-│ │ ├── app.py
-│ │ ├── Dockerfile
-│ │ ├── Pipfile
-│ │ ├── dockershell.sh
-│ │ ├── secrets/
-│ │ └── output/
-│ └── LumenAI_Mini/ # Lightweight implementation
-│ ├── app.py
-│ ├── Dockerfile
-│ ├── Pipfile
-│ ├── dockershell.sh
-│ ├── secrets/
-│ └── output/
-├── data_loader/
-| ├── Dockerfile
-| ├── load_data.py
-| ├── Pipfile
-| └── Pipfile.lock
-
+├── LICENSE
+├── .gitignore
+├── src/
+│   ├── app/                      # Application implementations
+│   │   ├── LumenAI/             # Base OpenAI implementation
+│   │   │   ├── app.py           # Main application logic
+│   │   │   ├── Dockerfile
+│   │   │   ├── Pipfile
+│   │   │   ├── dockershell.sh
+│   │   │   ├── secrets/         # API keys
+│   │   │   └── output/          # Database files
+│   │   ├── LumenAI_Advanced/    # Enhanced implementation
+│   │   │   ├── app.py
+│   │   │   ├── Dockerfile
+│   │   │   ├── Pipfile
+│   │   │   ├── dockershell.sh
+│   │   │   ├── secrets/
+│   │   │   └── output/
+│   │   ├── LumenAI_Deepseek_Local/  # Local model implementation
+│   │   │   ├── app.py
+│   │   │   ├── Dockerfile
+│   │   │   ├── Pipfile
+│   │   │   ├── dockershell.sh
+│   │   │   ├── secrets/
+│   │   │   └── output/
+│   │   └── LumenAI_Mini/        # Lightweight implementation
+│   │       ├── app.py
+│   │       ├── Dockerfile
+│   │       ├── Pipfile
+│   │       ├── dockershell.sh
+│   │       ├── secrets/
+│   │       └── output/
+│   ├── data/                    # Data files
+│   │   ├── AdventureWorks_Calendar.csv
+│   │   ├── AdventureWorks_Customers.csv
+│   │   ├── AdventureWorks_Product_Categories.csv
+│   │   ├── AdventureWorks_Product_Subcategories.csv
+│   │   ├── AdventureWorks_Products.csv
+│   │   ├── AdventureWorks_Returns.csv
+│   │   ├── AdventureWorks_Sales_2015.csv
+│   │   ├── AdventureWorks_Sales_2016.csv
+│   │   ├── AdventureWorks_Sales_2017.csv
+│   │   └── AdventureWorks_Territories.csv
+│   └── data_loader/            # Data loading utilities
+│       ├── Dockerfile
+│       ├── load_data.py
+│       ├── Pipfile
+│       └── Pipfile.lock
+└── reports/                    # Project documentation
+    ├── M2_Report.pdf
+    └── Statement_of_Work.pdf
+```
 
 ### Application Variants
 
