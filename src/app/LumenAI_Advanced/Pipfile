@@ -1,0 +1,16 @@
+[[source]]
+name = "pypi"
+url = "https://pypi.org/simple"
+verify_ssl = true
+
+[requires]
+python_version = "3.9"
+
+[packages]
+llama-index = "*"
+llama-index-embeddings-huggingface = "*"
+llama-index-llms-openai = "*"
+openai = "*"
+transformers = "*"
+pandas = "*"
+typing-extensions = "*"
