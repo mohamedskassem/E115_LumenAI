@@ -2,7 +2,7 @@ import os
 import sqlite3
 import json
 import concurrent.futures
-from typing import List, Tuple
+from typing import List, Tuple, Dict
 from llama_index.core import VectorStoreIndex, Document, Settings, PromptTemplate
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.llms.openai import OpenAI
@@ -15,6 +15,38 @@ with open("secrets/openai_api_key.txt", "r") as key_file:
 
 # Disable tokenizer parallelism warnings
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+# ------------------------------
+# Conversation History Class
+# ------------------------------
+class ConversationHistory:
+    def __init__(self, max_history: int = 5):
+        self.history: List[Dict] = []
+        self.max_history = max_history
+    
+    def add_interaction(self, question: str, sql_query: str, results: str, analysis: str):
+        interaction = {
+            "question": question,
+            "sql_query": sql_query,
+            "results": results,
+            "analysis": analysis
+        }
+        self.history.append(interaction)
+        if len(self.history) > self.max_history:
+            self.history.pop(0)
+    
+    def get_formatted_history(self) -> str:
+        if not self.history:
+            return ""
+        
+        formatted = "\nPrevious conversation context:\n"
+        for i, interaction in enumerate(self.history, 1):
+            formatted += f"\nQ{i}: {interaction['question']}\n"
+            formatted += f"SQL: {interaction['sql_query']}\n"
+            formatted += f"Results: {interaction['results']}\n"
+            formatted += f"Analysis: {interaction['analysis']}\n"
+            formatted += "-" * 40 + "\n"
+        return formatted
 
 # ------------------------------
 # Function: Analyze Column
@@ -139,12 +171,18 @@ def load_db_schema_and_column_summaries(db_path: str, llm, cache_file: str = "sc
 # ------------------------------
 # Function: Generate SQL Query
 # ------------------------------
-def generate_sql_query(user_question, full_schema, query_engine, llm):
+def generate_sql_query(user_question, full_schema, query_engine, llm, conversation_history=None):
     """
     Generate SQL query using context from LlamaIndex and schema information.
+    Now includes conversation history for context.
     """
     # Retrieve relevant context from LlamaIndex
     retrieved_context = str(query_engine.query(user_question))
+
+    # Get conversation history if available
+    history_context = ""
+    if conversation_history:
+        history_context = conversation_history.get_formatted_history()
 
     # Construct the prompt with developer instructions and example
     developer_msg = (
@@ -152,6 +190,7 @@ def generate_sql_query(user_question, full_schema, query_engine, llm):
         "Your goal is to generate a valid SQL query to provide the best answer to the user.\n\n"
         "This is the table schema:\n"
         f"{full_schema}\n\n"
+        f"{history_context}\n"  # Add conversation history
         "Use this schema to generate as an output the SQL query.\n\n"
         "For example:\n\n"
         "USER INPUT: Show me the total revenue for each region for sales made in 2024.\n"
@@ -183,18 +222,46 @@ def generate_sql_query(user_question, full_schema, query_engine, llm):
 # ------------------------------
 # Function: Generate Analysis
 # ------------------------------
-def generate_analysis(sql_query, query_results, full_schema, llm, user_question):
+def generate_analysis(sql_query, query_results, full_schema, llm, user_question, conversation_history=None):
     """
     Generate analysis of query results in the context of the original question.
+    Now includes comparative analysis with previous interactions.
     """
-    analysis_prompt_str = (
-        f"Based on the following query results, answer the user's question in a clear and concise way.\n\n"
-        f"User Question: {user_question}\n"
-        f"Results: {query_results}\n\n"
-        "Provide a direct answer focusing on the key findings from the results. "
-        "If the results contain specific numbers or data points, include them in your explanation.\n"
-        "Analysis:"
-    )
+    # Get relevant previous interaction for comparison
+    previous_context = ""
+    if conversation_history and conversation_history.history:
+        previous_interaction = conversation_history.history[-1]
+        previous_context = f"""
+Previous interaction:
+Question: {previous_interaction['question']}
+Results: {previous_interaction['results']}
+"""
+
+    analysis_prompt_str = f"""
+You are a helpful data analyst having a conversation with a user. Analyze the query results and provide a natural, conversational response.
+
+Context:
+- User Question: {user_question}
+- Query Results: {query_results}
+{previous_context}
+
+Guidelines for your response:
+1. Start with a direct answer to the question
+2. Format numbers in a readable way (e.g., 1,234,567 instead of 1234567)
+3. If there's previous context:
+   - Compare with previous results
+   - Highlight any interesting changes or trends
+   - Use phrases like "compared to", "increased/decreased by", "higher/lower than"
+4. Add relevant insights or observations
+5. Keep the tone conversational but professional
+6. If the results show a significant change, suggest possible factors
+
+Example style:
+"The sales for 2017 were 47,000 units, which is 2,000 units higher than 2016's 45,000 units. This 4.4% increase might be attributed to the new product launches in Q2 2017."
+
+Please provide your analysis:
+"""
+    
     analysis_prompt = PromptTemplate(template=analysis_prompt_str)
     return llm.predict(analysis_prompt)
 
@@ -228,11 +295,14 @@ def main():
     # Initialize LLM with optimized settings
     Settings.llm = OpenAI(
         temperature=0.01,
-        max_new_tokens=500,  # Reduced from 1200
+        max_new_tokens=500,
         model="o3-mini",
-        request_timeout=30  # Add timeout to prevent hanging
+        request_timeout=30
     )
     llm = Settings.llm
+
+    # Initialize conversation history
+    conversation_history = ConversationHistory()
 
     # Load database and generate schema documents
     db_path = "./output/adventure_works.db"
@@ -258,8 +328,14 @@ def main():
         if user_question.lower() in ["exit", "quit"]:
             break
 
-        # Generate and execute query
-        final_sql_query, full_response = generate_sql_query(user_question, full_schema, query_engine, llm)
+        # Generate and execute query with conversation history
+        final_sql_query, full_response = generate_sql_query(
+            user_question, 
+            full_schema, 
+            query_engine, 
+            llm,
+            conversation_history
+        )
         print("\nGenerated SQL Query:")
         print(final_sql_query)
 
@@ -272,11 +348,26 @@ def main():
         print("\nQuery Results:")
         print(query_results)
 
-        # Generate analysis of results
-        analysis = generate_analysis(final_sql_query, query_results, full_schema, llm, user_question)
+        # Generate analysis of results with conversation history
+        analysis = generate_analysis(
+            final_sql_query, 
+            query_results, 
+            full_schema, 
+            llm, 
+            user_question,
+            conversation_history
+        )
         print("\nAnalysis:")
         print(analysis)
         print("\n" + "-" * 60 + "\n")
+
+        # Add the interaction to conversation history
+        conversation_history.add_interaction(
+            user_question,
+            final_sql_query,
+            str(query_results),
+            analysis
+        )
 
     # Cleanup
     conn.close()
