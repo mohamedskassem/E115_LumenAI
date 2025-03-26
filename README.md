@@ -5,14 +5,13 @@
 ├── LICENSE
 ├── .gitignore
 ├── src/
-│   ├── app/                      # Application implementations
-│   │   └── LumenAI_Advanced/    # Enhanced implementation
-│   │       ├── app.py
-│   │       ├── Dockerfile
-│   │       ├── Pipfile
-│   │       ├── dockershell.sh
-│   │       ├── secrets/
-│   │       └── output/
+│   ├── app/                      # Application implementation
+│   │   ├── app.py
+│   │   ├── Dockerfile
+│   │   ├── Pipfile
+│   │   ├── dockershell.sh
+│   │   ├── secrets/
+│   │   └── output/
 │   ├── data/                    # Data files
 │   │   ├── AdventureWorks_Calendar.csv
 │   │   ├── AdventureWorks_Customers.csv
@@ -35,24 +34,16 @@
 
 ### Application Implementation
 
-The project uses LumenAI_Advanced, which is an enhanced implementation of the Text-to-SQL system:
+The project now focuses on a single, optimized Text-to-SQL system with the following enhancements since Milestone 2:
 
-**LumenAI_Advanced**
-- Enhanced implementation with advanced features
-- Features:
-  - Natural language to SQL conversion
-  - Schema-aware query generation
-  - Interactive CLI interface
-  - Vector-based schema understanding
-  - Advanced query optimization
-  - Sophisticated schema analysis
-  - Extended error handling
-  - Improved result analysis
-- Dependencies: 
-  - OpenAI API
-  - LlamaIndex
-  - HuggingFace embeddings
-  - Additional optimization libraries
+**Key Enhancements**
+- **Conversation History**: Maintains chat context for improved follow-up queries
+- **Parallel Processing**: Multi-threaded table and column analysis for faster loading
+- **Performance Optimization**: Schema analysis caching for quicker startup times
+- **Contextual SQL Generation**: Generates SQL queries using both schema and conversation history
+- **Vector-based Schema Understanding**: Leverages LlamaIndex embeddings for semantic understanding of database structure
+- **Comparative Analysis**: Results analysis now includes comparisons with previous query results
+- **Optimized Prompts**: More concise and effective prompts for better LLM responses
 
 ### Components Structure
 
@@ -72,7 +63,7 @@ The application includes:
 
 To run the application using Docker:
 ```bash
-cd src/app/LumenAI_Advanced
+cd src/app
 ./dockershell.sh
 ```
 
