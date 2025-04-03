@@ -222,4 +222,30 @@ body {
 .chatbox::-webkit-scrollbar-thumb {
     background-color: rgba(0, 0, 0, 0.2);
     border-radius: 3px;
+}
+
+/* Model Selector Styles */
+.model-selector-area {
+    padding: 10px 30px 10px;
+    border-bottom: 1px solid #e5e5e5;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background-color: #f9f9f9;
+}
+
+.model-selector-area label {
+    font-size: 13px;
+    font-weight: 500;
+    color: #3c3c43;
+}
+
+.model-selector-area select {
+    padding: 5px 8px;
+    border-radius: 6px;
+    border: 1px solid #d1d1d6;
+    font-size: 13px;
+    font-family: inherit;
+    flex-grow: 1;
+    max-width: 200px; /* Adjust as needed */
 } 

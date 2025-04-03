@@ -16,6 +16,17 @@
             <p>Ask questions about the Adventure Works database.</p>
         </header>
 
+        <div class="model-selector-area">
+            <label for="modelSelector">Model:</label>
+            <select id="modelSelector" name="model">
+                <option value="gpt-4-turbo" selected>GPT-4 Turbo</option>
+                <!-- Use the specific Gemini model name expected by the backend -->
+                <option value="gemini-2.5-pro-exp-03-25">Gemini 2.5 Pro Exp (03-25)</option>
+                <!-- Add other models here if needed -->
+                <!-- <option value="gpt-4o-mini">GPT-4o Mini</option> -->
+            </select>
+        </div>
+
         <div id="chatbox" class="chatbox">
             <!-- Chat messages will appear here -->
              <div class="message bot-message">

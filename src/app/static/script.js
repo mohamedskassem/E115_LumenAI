@@ -5,6 +5,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const loadingIndicator = document.getElementById('loadingIndicator');
     const sqlDisplay = document.getElementById('sqlDisplay');
     const sqlCode = document.getElementById('sqlCode');
+    const modelSelector = document.getElementById('modelSelector');
 
     // --- Event Listeners ---
     sendButton.addEventListener('click', sendMessage);
@@ -79,7 +80,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 headers: {
                     'Content-Type': 'application/json',
                 },
-                body: JSON.stringify({ question: question }),
+                body: JSON.stringify({ 
+                    question: question,
+                    model: modelSelector.value 
+                }),
             });
 
             toggleLoading(false);

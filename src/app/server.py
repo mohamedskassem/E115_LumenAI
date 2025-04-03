@@ -11,10 +11,11 @@ app = Flask(__name__)
 # Load environment variables or config for DB path
 DB_PATH = "./output/adventure_works.db" # Make sure this path is accessible inside the container
 CACHE_FILE = "schema_cache.json"
+DEFAULT_MODEL = "gpt-4-turbo" # Define default model here or load from config
 
 try:
     logging.info("Initializing TextToSqlAgent...")
-    agent = TextToSqlAgent(db_path=DB_PATH, cache_file=CACHE_FILE)
+    agent = TextToSqlAgent(db_path=DB_PATH, cache_file=CACHE_FILE, default_model=DEFAULT_MODEL)
     logging.info("TextToSqlAgent initialized successfully.")
 except Exception as e:
     logging.error(f"Failed to initialize TextToSqlAgent: {e}", exc_info=True)
@@ -37,15 +38,17 @@ def handle_query():
     try:
         data = request.get_json()
         user_question = data.get('question')
+        # Get model name from request, fallback to default if not provided
+        model_name = data.get('model', DEFAULT_MODEL)
 
         if not user_question:
             logging.warning("Received empty question.")
             return jsonify({"error": "No question provided."}), 400
 
-        logging.info(f"Received query request: '{user_question}'")
+        logging.info(f"Received query request for model '{model_name}': '{user_question}'")
 
         # Process the query using the agent
-        response = agent.process_query(user_question)
+        response = agent.process_query(user_question, model_name)
 
         logging.info(f"Sending response: Type={response.get('type')}, Message snippet='{response.get('message', '')[:50]}...'")
 

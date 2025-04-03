@@ -17,7 +17,12 @@ docker rm lumenai > /dev/null 2>&1 || true
 echo "Running the Docker container '${IMAGE_NAME}' with name 'lumenai'..."
 echo "Access the application at http://localhost:5001"
 # Run the container in interactive mode, mapping port 5000, and mounting volumes
-docker run -it --name lumenai -p 5001:5000 -v ./output:/app/output -v ./secrets:/app/secrets ${IMAGE_NAME}
+docker run -it --name lumenai \
+    -p 5001:5000 \
+    -v ./output:/app/output \
+    -v ./secrets:/app/secrets \
+    -e GOOGLE_APPLICATION_CREDENTIALS=/app/secrets/google_api_key.json \
+    ${IMAGE_NAME}
 
 if [ $? -ne 0 ]; then
     echo "Docker run failed. Please check the container logs."

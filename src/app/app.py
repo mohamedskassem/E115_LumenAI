@@ -7,6 +7,7 @@ import logging
 from llama_index.core import VectorStoreIndex, Document, Settings, PromptTemplate
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.llms.openai import OpenAI
+from llama_index.llms.gemini import Gemini
 
 # ------------------------------
 # Configure Logging
@@ -71,13 +72,14 @@ class ConversationHistory:
 # TextToSqlAgent Class
 # ------------------------------
 class TextToSqlAgent:
-    def __init__(self, db_path: str, cache_file: str = "schema_cache.json", openai_model: str = "o3-mini", embed_model_name: str = "all-MiniLM-L6-v2"):
+    def __init__(self, db_path: str, cache_file: str = "schema_cache.json", default_model: str = "gpt-4-turbo", embed_model_name: str = "all-MiniLM-L6-v2"):
         logging.info("Initializing TextToSqlAgent...")
         self.db_path = db_path
         self.cache_file = cache_file
-        self.openai_model = openai_model
+        self.default_model = default_model # Model for schema analysis and default queries
         self.embed_model_name = embed_model_name
-        self.llm = None
+        self.default_llm = None # LLM instance used for schema loading
+        self.initialized_llms: Dict[str, Union[OpenAI, Gemini]] = {} # Cache for dynamically loaded LLMs
         self.embed_model = None
         self.index = None
         self.query_engine = None
@@ -91,14 +93,12 @@ class TextToSqlAgent:
         """Initialize LLM, embeddings, load schema, build index, connect to DB."""
         logging.info("Initializing LLM and Embeddings...")
         try:
-            # Initialize LLM with optimized settings
-            Settings.llm = OpenAI(
-                temperature=0.01,
-                max_new_tokens=500,
-                model="gpt-4-turbo",
-                request_timeout=60 # Increased timeout
-            )
-            self.llm = Settings.llm
+            # Initialize the DEFAULT LLM (used for schema analysis)
+            # Note: We don't set the global Settings.llm anymore
+            self.default_llm = self._get_llm(self.default_model) # Initialize default model immediately
+            if not self.default_llm:
+                raise ValueError(f"Failed to initialize default LLM: {self.default_model}")
+            logging.info(f"Default LLM ({self.default_model}) initialized for agent startup tasks.")
 
             # Initialize Embeddings
             self.embed_model = HuggingFaceEmbedding(model_name=self.embed_model_name)
@@ -121,9 +121,19 @@ class TextToSqlAgent:
 
         logging.info("Initializing Vector Store Index...")
         try:
+            # Temporarily set global LLM for index/engine setup, if needed by components
+            # to prevent falling back to implicit OpenAI defaults.
+            original_llm = Settings.llm # Store original global (if any)
+            Settings.llm = self.default_llm # Use the agent's default LLM
+
             # Initialize LlamaIndex with documents
             self.index = VectorStoreIndex.from_documents(schema_docs, embed_model=self.embed_model)
-            self.query_engine = self.index.as_query_engine()
+            # Configure query engine to only retrieve context, not synthesize text
+            self.query_engine = self.index.as_query_engine(response_mode="no_text")
+            
+            # Restore original global LLM setting after setup
+            Settings.llm = original_llm
+
             # self._print_vector_store_samples(num_samples=1) # Optional: for debugging
             logging.info("Vector Store Index initialized successfully.")
         except Exception as e:
@@ -132,8 +142,8 @@ class TextToSqlAgent:
                 self.conn.close()
             raise
 
-    def _analyze_column(self, col_name, table_name, sample_data):
-        """Analyzes a single column using the LLM."""
+    def _analyze_column(self, col_name, table_name, sample_data, llm):
+        """Analyzes a single column using the provided LLM instance."""
         combined_prompt = f"""
         Briefly describe column '{col_name}' in table '{table_name}':
         - Purpose
@@ -143,7 +153,7 @@ class TextToSqlAgent:
         Keep the response under 2 sentences.
         """
         try:
-            response = self.llm.predict(PromptTemplate(template=combined_prompt))
+            response = llm.predict(PromptTemplate(template=combined_prompt))
             doc_text = (
                 f"Table: {table_name}\n"
                 f"Column: {col_name}\n"
@@ -155,7 +165,7 @@ class TextToSqlAgent:
             # Return a basic doc text even if LLM fails
             return f"Table: {table_name}\nColumn: {col_name}\nSummary: Analysis failed."
 
-    def _process_table(self, table_info: Tuple[str, List[Tuple], List[Tuple], dict]) -> Tuple[str, List[Document]]:
+    def _process_table(self, table_info: Tuple[str, List[Tuple], List[Tuple], dict], llm) -> Tuple[str, List[Document]]:
         """Processes a single table and its columns."""
         table_name, columns, sample_data, column_indices = table_info
         table_schema = f"Table: {table_name}\n"
@@ -169,7 +179,7 @@ class TextToSqlAgent:
             
             col_samples = [row[column_indices[col_name]] for row in sample_data if len(row) > column_indices[col_name]]
             
-            doc_text = self._analyze_column(col_name, table_name, col_samples)
+            doc_text = self._analyze_column(col_name, table_name, col_samples, llm)
             schema_documents.append(Document(text=doc_text))
         
         table_schema += "\n"
@@ -214,7 +224,8 @@ class TextToSqlAgent:
         # Use ThreadPoolExecutor for parallel processing
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(5, len(table_data) if table_data else 1)) as executor:
             future_to_table = {
-                executor.submit(self._process_table, table_info): table_info[0]
+                # Use the default LLM for schema analysis during startup
+                executor.submit(self._process_table, table_info, self.default_llm): table_info[0]
                 for table_info in table_data
             }
             for future in concurrent.futures.as_completed(future_to_table):
@@ -241,7 +252,7 @@ class TextToSqlAgent:
 
         return full_schema, schema_documents, conn
 
-    def _validate_question(self, user_question: str) -> Dict:
+    def _validate_question(self, user_question: str, llm) -> Dict:
         """
         Uses LLM to validate if the question needs SQL, can be answered directly,
         or requires clarification.
@@ -290,7 +301,7 @@ OUTPUT:""" # Ensure the LLM starts its response right after this.
 
         try:
             prompt = PromptTemplate(template=validation_prompt_str)
-            response = self.llm.predict(prompt).strip()
+            response = llm.predict(prompt).strip()
             logging.debug(f"Validation LLM response: {response}")
 
             parts = response.split(":", 1)
@@ -310,7 +321,7 @@ OUTPUT:""" # Ensure the LLM starts its response right after this.
             # Fallback in case of API error
             return {"action": "SQL_NEEDED", "details": ""} # Default to SQL needed on error
 
-    def _generate_sql_query(self, user_question: str) -> Tuple[Optional[str], str]:
+    def _generate_sql_query(self, user_question: str, llm) -> Tuple[Optional[str], str]:
         """Generates SQL query using context from LlamaIndex and schema information."""
         logging.info(f"Generating SQL for question: '{user_question}'")
         try:
@@ -359,7 +370,9 @@ LIMIT 3;
 
         try:
             prompt = PromptTemplate(template=prompt_str)
-            response = self.llm.predict(prompt).strip()
+            logging.info(f"Attempting SQL generation using LLM type: {type(llm)}") # DEBUG LOG
+            response = llm.predict(prompt).strip()
+            logging.info(f"Completed SQL generation using LLM type: {type(llm)}") # DEBUG LOG
             logging.debug(f"SQL Generation LLM response: {response}")
 
             # Basic validation/cleanup of the generated SQL
@@ -375,7 +388,7 @@ LIMIT 3;
             logging.info(f"Generated SQL: {final_sql}")
             return final_sql, response # Return both raw and cleaned
         except Exception as e:
-            logging.error(f"Error during SQL generation LLM call: {e}", exc_info=True)
+            logging.error(f"Error during SQL generation LLM call with {type(llm)}: {e}", exc_info=True) # DEBUG LOG
             return None, f"Error generating SQL: {e}"
 
     def _execute_sql_query(self, sql_query: str) -> Union[List[Tuple], str]:
@@ -400,7 +413,7 @@ LIMIT 3;
             logging.error(f"An unexpected error occurred during query execution: {e}", exc_info=True)
             return f"An unexpected error occurred: {e}"
 
-    def _generate_analysis(self, user_question: str, sql_query: str, query_results: Union[List[Tuple], str]) -> str:
+    def _generate_analysis(self, user_question: str, sql_query: str, query_results: Union[List[Tuple], str], llm) -> str:
         """Generates a natural language analysis of the query results."""
         logging.info("Generating analysis for query results.")
         history_context = self.conversation_history.get_formatted_history()
@@ -454,7 +467,7 @@ Now, generate the analysis for the user:
 
         try:
             analysis_prompt = PromptTemplate(template=analysis_prompt_str)
-            analysis = self.llm.predict(analysis_prompt).strip()
+            analysis = llm.predict(analysis_prompt).strip()
             logging.info("Analysis generated successfully.")
             logging.debug(f"Generated Analysis: {analysis}")
             return analysis
@@ -462,14 +475,23 @@ Now, generate the analysis for the user:
             logging.error(f"Error during analysis generation LLM call: {e}", exc_info=True)
             return f"Error generating analysis: {e}"
 
-    def process_query(self, user_question: str) -> Dict[str, Optional[str]]:
+    def process_query(self, user_question: str, model_name: str) -> Dict[str, Optional[str]]:
         """
         Processes the user's question: validates, potentially clarifies,
         generates/executes SQL, and returns analysis or response.
         """
         logging.info(f"Processing user query: '{user_question}'")
 
-        validation_result = self._validate_question(user_question)
+        # Get the appropriate LLM instance for this request
+        try:
+            llm = self._get_llm(model_name)
+            if not llm:
+                 raise ValueError(f"Could not initialize LLM for model: {model_name}")
+        except Exception as e:
+             logging.error(f"Failed to get LLM instance: {e}", exc_info=True)
+             return {"type": "error", "message": f"Error initializing language model: {e}", "sql_query": None}
+
+        validation_result = self._validate_question(user_question, llm)
         action = validation_result["action"]
         details = validation_result["details"]
 
@@ -496,12 +518,12 @@ Now, generate the analysis for the user:
 
         elif action == "SQL_NEEDED":
             logging.info("Action: SQL_NEEDED")
-            sql_query, raw_llm_sql_response = self._generate_sql_query(user_question)
+            sql_query, raw_llm_sql_response = self._generate_sql_query(user_question, llm)
             response["sql_query"] = sql_query # Include the generated SQL in the response
 
             if sql_query:
                 query_results = self._execute_sql_query(sql_query)
-                analysis = self._generate_analysis(user_question, sql_query, query_results)
+                analysis = self._generate_analysis(user_question, sql_query, query_results, llm)
                 response["message"] = analysis
                 self.conversation_history.add_interaction(
                     question=user_question,
@@ -532,6 +554,59 @@ Now, generate the analysis for the user:
 
         logging.info(f"Finished processing query. Response type: {response['type']}")
         return response
+
+    def _get_llm(self, model_name: str) -> Optional[Union[OpenAI, Gemini]]:
+        """Gets an initialized LLM instance, caching it if necessary."""
+        if model_name in self.initialized_llms:
+            logging.debug(f"Using cached LLM instance for: {model_name}")
+            return self.initialized_llms[model_name]
+
+        logging.info(f"Initializing LLM for: {model_name}")
+        llm_instance = None
+        try:
+            if model_name.startswith("gpt-"):
+                llm_instance = OpenAI(
+                    model=model_name,
+                    temperature=0.01,
+                    max_new_tokens=500, # Consider adjusting based on model
+                    request_timeout=60
+                )
+            # Handle both standard (models/gemini-...) and experimental Gemini names
+            elif model_name.startswith("models/gemini-") or model_name == "gemini-2.5-pro-exp-03-25":
+                # When using Service Account authentication (ADC), the library primarily uses GOOGLE_APPLICATION_CREDENTIALS.
+                # We just need to ensure that variable is likely set (it's set in dockershell.sh).
+                if not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+                    logging.error("GOOGLE_APPLICATION_CREDENTIALS environment variable not set. Cannot initialize Gemini via ADC.")
+                    return None
+
+                # Construct the correct model name if it doesn't start with models/
+                # The library requires the 'models/' prefix even for experimental names
+                # For experimental ones, it might accept the short name directly.
+                # Let's pass the provided name directly for now.
+                # If this causes issues, we might need to prepend "models/"
+                # conditionally based on the specific experimental model string.
+                gemini_model_id = model_name
+                # The library requires the 'models/' prefix even for experimental names
+                if not gemini_model_id.startswith("models/") and not gemini_model_id.startswith("tunedModels/"):
+                     gemini_model_id = f"models/{gemini_model_id}"
+                     logging.info(f"Prepended 'models/' prefix. Using: {gemini_model_id}")
+
+                llm_instance = Gemini(
+                    model_name=gemini_model_id,
+                    temperature=0.01, # Note: Gemini might use different temp scale/defaults
+                    # Add other relevant Gemini parameters if needed
+                )
+            else:
+                logging.error(f"Unsupported model name provided: {model_name}")
+                return None
+
+            self.initialized_llms[model_name] = llm_instance
+            logging.info(f"Successfully initialized LLM for: {model_name}")
+            return llm_instance
+
+        except Exception as e:
+            logging.error(f"Error initializing LLM {model_name}: {e}", exc_info=True)
+            return None # Failed to initialize
 
     def _print_vector_store_samples(self, num_samples=3):
         """Prints sample documents from the vector store."""
