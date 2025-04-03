@@ -21,6 +21,8 @@ docker run -it --name lumenai \
     -p 5001:5000 \
     -v ./output:/app/output \
     -v ./secrets:/app/secrets \
+    -v ./vector_store_cache:/app/vector_store_cache \
+    -v ./uploads:/app/uploads \
     -e GOOGLE_APPLICATION_CREDENTIALS=/app/secrets/google_api_key.json \
     ${IMAGE_NAME}
 

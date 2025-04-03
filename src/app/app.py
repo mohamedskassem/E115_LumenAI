@@ -1,11 +1,12 @@
 import os
 import sqlite3
 import json
+import shutil # For deleting directories
 import concurrent.futures
 from typing import List, Tuple, Dict, Optional, Union
 import logging
-from llama_index.core import VectorStoreIndex, Document, Settings, PromptTemplate
-from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+from llama_index.core import VectorStoreIndex, Document, Settings, PromptTemplate, StorageContext, load_index_from_storage
+from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.llms.openai import OpenAI
 from llama_index.llms.gemini import Gemini
 
@@ -72,25 +73,36 @@ class ConversationHistory:
 # TextToSqlAgent Class
 # ------------------------------
 class TextToSqlAgent:
-    def __init__(self, db_path: str, cache_file: str = "schema_cache.json", default_model: str = "gpt-4-turbo", embed_model_name: str = "all-MiniLM-L6-v2"):
-        logging.info("Initializing TextToSqlAgent...")
+    def __init__(self, db_path: str, cache_file: str = "schema_cache.json", default_model: str = "gpt-4-turbo"):
+        logging.info("Initializing TextToSqlAgent object...")
+        # Configuration details stored, but initialization deferred
+        self.persist_dir = "vector_store_cache" # Directory to store the index
         self.db_path = db_path
         self.cache_file = cache_file
         self.default_model = default_model # Model for schema analysis and default queries
-        self.embed_model_name = embed_model_name
         self.default_llm = None # LLM instance used for schema loading
         self.initialized_llms: Dict[str, Union[OpenAI, Gemini]] = {} # Cache for dynamically loaded LLMs
-        self.embed_model = None
-        self.index = None
-        self.query_engine = None
-        self.conn = None
-        self.cursor = None
-        self.full_schema = ""
+        self.embed_model = None # Initialized in load_and_index
+        self.index = None # Initialized in load_and_index
+        self.query_engine = None # Initialized in load_and_index
+        self.conn = None # Initialized in load_and_index
+        self.cursor = None # Initialized in load_and_index
+        self.full_schema = "" # Initialized in load_and_index
         self.conversation_history = ConversationHistory()
-        self._initialize_agent()
+        self.is_initialized = False # Flag to track if indexing is complete
+        # Defer actual initialization until load_and_index is called
 
-    def _initialize_agent(self):
-        """Initialize LLM, embeddings, load schema, build index, connect to DB."""
+    def load_and_index(self):
+        """Loads data, initializes components, builds/loads index. Called after DB exists."""
+        if self.is_initialized:
+            logging.info("Agent already initialized.")
+            return True
+        
+        if not os.path.exists(self.db_path):
+            logging.error(f"Database path does not exist: {self.db_path}. Cannot initialize.")
+            return False
+            
+        logging.info(f"Starting initialization and indexing for DB: {self.db_path}")
         logging.info("Initializing LLM and Embeddings...")
         try:
             # Initialize the DEFAULT LLM (used for schema analysis)
@@ -101,7 +113,8 @@ class TextToSqlAgent:
             logging.info(f"Default LLM ({self.default_model}) initialized for agent startup tasks.")
 
             # Initialize Embeddings
-            self.embed_model = HuggingFaceEmbedding(model_name=self.embed_model_name)
+            logging.info("Initializing OpenAI Embeddings (text-embedding-3-small)...")
+            self.embed_model = OpenAIEmbedding(model="text-embedding-3-small")
         except Exception as e:
             logging.error(f"Error initializing LLM or Embeddings: {e}", exc_info=True)
             raise  # Re-raise after logging
@@ -120,6 +133,30 @@ class TextToSqlAgent:
             raise
 
         logging.info("Initializing Vector Store Index...")
+        # --- Try Loading Index from Cache --- 
+        if os.path.exists(self.persist_dir):
+            if not self.embed_model: # Ensure embed model is initialized first
+                logging.error("Embed model not initialized before loading index.")
+                return False
+            try:
+                logging.info(f"Loading existing vector store index from: {self.persist_dir}")
+                storage_context = StorageContext.from_defaults(persist_dir=self.persist_dir)
+                self.index = load_index_from_storage(storage_context, embed_model=self.embed_model)
+                self.query_engine = self.index.as_query_engine(response_mode="no_text")
+                logging.info("Vector Store Index loaded successfully from cache.")
+            except Exception as e:
+                logging.warning(f"Failed to load index from cache ({self.persist_dir}): {e}. Rebuilding...", exc_info=True)
+                self._build_and_persist_index(schema_docs) # Fallback to building
+        else:
+             logging.info(f"No existing vector store cache found at {self.persist_dir}. Building new index...")
+             self._build_and_persist_index(schema_docs)
+
+        self.is_initialized = True
+        logging.info("Agent initialization and indexing complete.")
+        return True
+
+    def _build_and_persist_index(self, schema_docs: List[Document]):
+        """Builds the vector index from documents and persists it."""
         try:
             # Temporarily set global LLM for index/engine setup, if needed by components
             # to prevent falling back to implicit OpenAI defaults.
@@ -131,11 +168,14 @@ class TextToSqlAgent:
             # Configure query engine to only retrieve context, not synthesize text
             self.query_engine = self.index.as_query_engine(response_mode="no_text")
             
+            logging.info(f"Persisting index to: {self.persist_dir}")
+            self.index.storage_context.persist(persist_dir=self.persist_dir)
+
             # Restore original global LLM setting after setup
             Settings.llm = original_llm
 
             # self._print_vector_store_samples(num_samples=1) # Optional: for debugging
-            logging.info("Vector Store Index initialized successfully.")
+            logging.info("Vector Store Index built and persisted successfully.")
         except Exception as e:
             logging.error(f"Error initializing Vector Store Index: {e}", exc_info=True)
             if self.conn:
@@ -478,8 +518,12 @@ Now, generate the analysis for the user:
     def process_query(self, user_question: str, model_name: str) -> Dict[str, Optional[str]]:
         """
         Processes the user's question: validates, potentially clarifies,
-        generates/executes SQL, and returns analysis or response.
+        generates/executes SQL, and returns analysis or response. Requires agent to be initialized.
         """
+        if not self.is_initialized or not self.query_engine or not self.conn:
+            logging.error("Agent not initialized. Cannot process query.")
+            return {"type": "error", "message": "Agent is not ready. Please ensure data is loaded and indexed.", "sql_query": None}
+
         logging.info(f"Processing user query: '{user_question}'")
 
         # Get the appropriate LLM instance for this request
@@ -633,11 +677,22 @@ Now, generate the analysis for the user:
         except Exception as e:
             logging.error(f"Error accessing vector store documents: {e}", exc_info=True)
 
-    def close_connection(self):
-        """Closes the database connection."""
+    def shutdown(self):
+        """Closes DB connection and resets state."""
+        logging.info("Shutting down agent resources...")
         if self.conn:
             self.conn.close()
-            logging.info("Database connection closed.")
+            self.conn = None
+        self.cursor = None
+        self.index = None
+        self.query_engine = None
+        self.default_llm = None
+        self.initialized_llms = {}
+        self.embed_model = None
+        self.full_schema = ""
+        self.is_initialized = False
+        # Keep conversation history? Optional. Let's keep it for now.
+        logging.info("Agent resources released.")
 
 # Note: The main execution block (`if __name__ == "__main__":`)
 # has been removed as this script will now be imported and used by the server.

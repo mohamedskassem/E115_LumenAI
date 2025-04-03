@@ -1,4 +1,15 @@
 document.addEventListener('DOMContentLoaded', () => {
+    // UI Sections
+    const dataLoaderSection = document.getElementById('dataLoaderSection');
+    const chatSection = document.getElementById('chatSection');
+
+    // Data Loader Elements
+    const csvUpload = document.getElementById('csvUpload');
+    const fileInfo = document.getElementById('fileInfo');
+    const uploadButton = document.getElementById('uploadButton');
+    const uploadStatus = document.getElementById('uploadStatus');
+
+    // Chat Section Elements
     const chatbox = document.getElementById('chatbox');
     const userInput = document.getElementById('userInput');
     const sendButton = document.getElementById('sendButton');
@@ -6,8 +17,17 @@ document.addEventListener('DOMContentLoaded', () => {
     const sqlDisplay = document.getElementById('sqlDisplay');
     const sqlCode = document.getElementById('sqlCode');
     const modelSelector = document.getElementById('modelSelector');
+    const refreshButton = document.getElementById('refreshIndexButton');
+    const removeDataButton = document.getElementById('removeDataButton');
+
+    // Initial State Check
+    checkInitialStatus();
 
     // --- Event Listeners ---
+    // Data Loader
+    csvUpload.addEventListener('change', handleFileSelection);
+    uploadButton.addEventListener('click', uploadFiles);
+    // Chat
     sendButton.addEventListener('click', sendMessage);
     userInput.addEventListener('keydown', (event) => {
         if (event.key === 'Enter' && !event.shiftKey) {
@@ -16,6 +36,8 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
     userInput.addEventListener('input', autoGrowTextarea);
+    refreshButton.addEventListener('click', refreshIndex);
+    removeDataButton.addEventListener('click', removeData);
 
     // --- Functions ---
     function autoGrowTextarea() {
@@ -117,4 +139,158 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Initial setup
     autoGrowTextarea(); // Adjust initial height and button state
+
+    // --- Refresh Index Function ---
+    async function refreshIndex() {
+        addMessage("Attempting to refresh index... This may take a moment.", 'system'); // Use a distinct style? For now, 'system' uses bot style
+        toggleLoading(true); // Disable input while refreshing
+        refreshButton.disabled = true;
+
+        try {
+            const response = await fetch('/refresh-index', {
+                method: 'POST'
+            });
+
+            toggleLoading(false);
+            refreshButton.disabled = false;
+
+            const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(data.error || `HTTP error! status: ${response.status}`);
+            }
+
+            addMessage(data.message || "Index refreshed successfully!", 'system');
+
+        } catch (error) {
+            console.error('Error refreshing index:', error);
+            toggleLoading(false);
+            refreshButton.disabled = false;
+            addMessage(error.message || "Could not refresh index.", 'bot', true); // Show error
+        }
+    }
+
+    // --- UI State Management ---
+    function showDataLoader() {
+        dataLoaderSection.style.display = 'flex';
+        chatSection.style.display = 'none';
+        clearChat(); // Clear chat when showing loader
+    }
+
+    function showChatInterface() {
+        dataLoaderSection.style.display = 'none';
+        chatSection.style.display = 'flex';
+        addMessage("Data loaded. Ask me anything about it!", 'system');
+    }
+
+    function clearChat() {
+        chatbox.innerHTML = ''; // Clear all messages
+    }
+
+    // --- Initial Status Check ---
+    async function checkInitialStatus() {
+        try {
+            const response = await fetch('/status');
+            if (!response.ok) throw new Error('Failed to fetch status');
+            const data = await response.json();
+            if (data.is_ready) {
+                showChatInterface();
+            } else {
+                showDataLoader();
+            }
+        } catch (error) {
+            console.error("Error checking initial status:", error);
+            showDataLoader(); // Default to loader on error
+            // Optionally show an error message to the user
+            uploadStatus.textContent = "Error contacting server. Please refresh.";
+            uploadStatus.className = 'status-message error';
+        }
+    }
+
+    // --- Data Loader Functions ---
+    function handleFileSelection() {
+        const files = csvUpload.files;
+        if (files.length > 0) {
+            fileInfo.textContent = `${files.length} file(s) selected`;
+            uploadButton.disabled = false;
+        } else {
+            fileInfo.textContent = "No files selected";
+            uploadButton.disabled = true;
+        }
+    }
+
+    async function uploadFiles() {
+        const files = csvUpload.files;
+        if (files.length === 0) return;
+
+        const formData = new FormData();
+        for (const file of files) {
+            formData.append('files', file);
+        }
+
+        uploadStatus.textContent = "Uploading and processing files... This may take time.";
+        uploadStatus.className = 'status-message';
+        uploadButton.disabled = true;
+
+        try {
+            const response = await fetch('/upload-data', {
+                method: 'POST',
+                body: formData,
+            });
+
+            const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(data.error || `HTTP error! status: ${response.status}`);
+            }
+
+            uploadStatus.textContent = data.message || "Upload successful! Initializing agent...";
+            uploadStatus.className = 'status-message success';
+            // Reset file input
+            csvUpload.value = ''; 
+            handleFileSelection();
+            // Switch UI
+            showChatInterface(); 
+
+        } catch (error) {
+            console.error('Error uploading files:', error);
+            uploadStatus.textContent = `Error: ${error.message}`;
+            uploadStatus.className = 'status-message error';
+            uploadButton.disabled = false; // Re-enable on error
+        }
+    }
+
+    // --- Remove Data Function ---
+    async function removeData() {
+        if (!confirm("Are you sure you want to remove the current data and index? This cannot be undone.")) {
+            return;
+        }
+        
+        addMessage("Removing data and index...", 'system');
+        toggleLoading(true); // Use loading indicator logic
+        removeDataButton.disabled = true;
+
+        try {
+            const response = await fetch('/remove-data', {
+                method: 'POST'
+            });
+
+            const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(data.error || data.message || `HTTP error! status: ${response.status}`);
+            }
+
+            uploadStatus.textContent = data.message || "Data removed successfully."; // Show status in upload section
+            uploadStatus.className = 'status-message success';
+            showDataLoader(); // Switch back to data loader UI
+
+        } catch (error) {
+            console.error('Error removing data:', error);
+            addMessage(`Error removing data: ${error.message}`, 'bot', true); // Show error in chat
+        } finally {
+             toggleLoading(false);
+             removeDataButton.disabled = false;
+        }
+    }
 }); 

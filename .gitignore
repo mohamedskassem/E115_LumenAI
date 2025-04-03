@@ -171,3 +171,12 @@ cython_debug/
 
 # Secrets - DO NOT COMMIT
 src/app/secrets/
+
+# Vector Store Cache - DO NOT COMMIT
+src/app/vector_store_cache/
+
+# Dynamic Database - DO NOT COMMIT
+src/app/output/user_data.db
+
+# Uploads - DO NOT COMMIT
+src/app/uploads/
