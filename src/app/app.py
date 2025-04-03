@@ -2,16 +2,28 @@ import os
 import sqlite3
 import json
 import concurrent.futures
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional, Union
+import logging
 from llama_index.core import VectorStoreIndex, Document, Settings, PromptTemplate
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.llms.openai import OpenAI
 
 # ------------------------------
+# Configure Logging
+# ------------------------------
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# ------------------------------
 # Load API Key from secrets
 # ------------------------------
-with open("secrets/openai_api_key.txt", "r") as key_file:
-    os.environ["OPENAI_API_KEY"] = key_file.read().strip()
+try:
+    with open("secrets/openai_api_key.txt", "r") as key_file:
+        os.environ["OPENAI_API_KEY"] = key_file.read().strip()
+except FileNotFoundError:
+    logging.error("API key file 'secrets/openai_api_key.txt' not found. Please create it.")
+    # Depending on the desired behavior, you might want to exit or raise an exception here.
+    # For now, we'll proceed, but OpenAI calls will fail.
+    pass
 
 # Disable tokenizer parallelism warnings
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -23,10 +35,12 @@ class ConversationHistory:
     def __init__(self, max_history: int = 5):
         self.history: List[Dict] = []
         self.max_history = max_history
+        logging.info(f"ConversationHistory initialized with max_history={max_history}")
     
-    def add_interaction(self, question: str, sql_query: str, results: str, analysis: str):
+    def add_interaction(self, question: str, response_type: str, sql_query: Optional[str] = None, results: Optional[str] = None, analysis: Optional[str] = None):
         interaction = {
             "question": question,
+            "response_type": response_type, # e.g., "sql_analysis", "direct_answer", "clarification_needed"
             "sql_query": sql_query,
             "results": results,
             "analysis": analysis
@@ -34,344 +48,522 @@ class ConversationHistory:
         self.history.append(interaction)
         if len(self.history) > self.max_history:
             self.history.pop(0)
+        logging.debug(f"Added interaction to history. Current length: {len(self.history)}")
     
     def get_formatted_history(self) -> str:
         if not self.history:
             return ""
         
-        formatted = "\nPrevious conversation context:\n"
+        formatted = "Previous conversation context:\n"
         for i, interaction in enumerate(self.history, 1):
-            formatted += f"\nQ{i}: {interaction['question']}\n"
-            formatted += f"SQL: {interaction['sql_query']}\n"
-            formatted += f"Results: {interaction['results']}\n"
-            formatted += f"Analysis: {interaction['analysis']}\n"
+            formatted += f"Interaction {i}:\n"
+            formatted += f"  User Question: {interaction['question']}\n"
+            if interaction['sql_query']:
+                formatted += f"  SQL Generated: {interaction['sql_query']}\n"
+            if interaction['results']:
+                formatted += f"  Query Results: {interaction['results']}\n"
+            if interaction['analysis']:
+                formatted += f"  Response/Analysis: {interaction['analysis']}\n"
             formatted += "-" * 40 + "\n"
         return formatted
 
 # ------------------------------
-# Function: Analyze Column
+# TextToSqlAgent Class
 # ------------------------------
-def analyze_column(col_name, table_name, sample_data, llm):
-    """
-    Optimized column analysis with a more concise prompt
-    """
-    combined_prompt = f"""
-    Briefly describe column '{col_name}' in table '{table_name}':
-    - Purpose
-    - Data type
-    - Sample values: {sample_data[:3]}  # Reduced from 5 to 3 samples
-    
-    Keep the response under 2 sentences.
-    """
-    
-    response = llm.predict(PromptTemplate(template=combined_prompt))
-    
-    # Create a minimal document structure
-    doc_text = (
-        f"Table: {table_name}\n"
-        f"Column: {col_name}\n"
-        f"Summary: {response.strip()}"
-    )
-    
-    return doc_text
+class TextToSqlAgent:
+    def __init__(self, db_path: str, cache_file: str = "schema_cache.json", openai_model: str = "o3-mini", embed_model_name: str = "all-MiniLM-L6-v2"):
+        logging.info("Initializing TextToSqlAgent...")
+        self.db_path = db_path
+        self.cache_file = cache_file
+        self.openai_model = openai_model
+        self.embed_model_name = embed_model_name
+        self.llm = None
+        self.embed_model = None
+        self.index = None
+        self.query_engine = None
+        self.conn = None
+        self.cursor = None
+        self.full_schema = ""
+        self.conversation_history = ConversationHistory()
+        self._initialize_agent()
 
-# ------------------------------
-# Function: Process Table
-# ------------------------------
-def process_table(table_info: Tuple[str, List[Tuple], List[Tuple], dict], llm) -> Tuple[str, List[Document]]:
-    """
-    Process a single table and its columns
-    """
-    table_name, columns, sample_data, column_indices = table_info
-    table_schema = f"Table: {table_name}\n"
-    schema_documents = []
-    
-    for col in columns:
-        col_name = col[1]
-        col_type = col[2]
-        table_schema += f"  - {col_name} ({col_type})\n"
-        
-        # Get sample values for this column
-        col_samples = [row[column_indices[col_name]] for row in sample_data]
-        
-        # Perform column analysis
-        doc_text = analyze_column(col_name, table_name, col_samples, llm)
-        schema_documents.append(Document(text=doc_text))
-    
-    table_schema += "\n"
-    return table_schema, schema_documents
+    def _initialize_agent(self):
+        """Initialize LLM, embeddings, load schema, build index, connect to DB."""
+        logging.info("Initializing LLM and Embeddings...")
+        try:
+            # Initialize LLM with optimized settings
+            Settings.llm = OpenAI(
+                temperature=0.01,
+                max_new_tokens=500,
+                model="gpt-4-turbo",
+                request_timeout=60 # Increased timeout
+            )
+            self.llm = Settings.llm
 
-# ------------------------------
-# Function: Load DB Schema and Column Summaries
-# ------------------------------
-def load_db_schema_and_column_summaries(db_path: str, llm, cache_file: str = "schema_cache.json") -> Tuple[str, List[Document], sqlite3.Connection]:
-    """
-    Load database schema and generate summaries with parallel processing
-    """
-    # Try to load from cache first
-    if os.path.exists(cache_file):
-        print("Loading cached schema analysis...")
-        with open(cache_file, 'r') as f:
-            cache = json.load(f)
-            return cache['schema'], [Document(text=doc) for doc in cache['documents']], sqlite3.connect(db_path)
-    
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    
-    # Get all tables
-    cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
-    tables = cursor.fetchall()
-    
-    print("\nLoading database schema and analyzing columns...")
-    
-    # Prepare table data for parallel processing
-    table_data = []
-    for table in tables:
-        table_name = table[0]
-        cursor.execute(f"PRAGMA table_info({table_name});")
-        columns = cursor.fetchall()
+            # Initialize Embeddings
+            self.embed_model = HuggingFaceEmbedding(model_name=self.embed_model_name)
+        except Exception as e:
+            logging.error(f"Error initializing LLM or Embeddings: {e}", exc_info=True)
+            raise  # Re-raise after logging
+
+        logging.info("Loading DB schema and column summaries...")
+        try:
+            # Load database and generate schema documents
+            self.full_schema, schema_docs, self.conn = self._load_db_schema_and_column_summaries()
+            self.cursor = self.conn.cursor()
+            logging.info("Database schema loaded and connection established.")
+            logging.debug(f"Full Schema:\n{self.full_schema}")
+        except Exception as e:
+            logging.error(f"Error loading database schema: {e}", exc_info=True)
+            if self.conn:
+                self.conn.close()
+            raise
+
+        logging.info("Initializing Vector Store Index...")
+        try:
+            # Initialize LlamaIndex with documents
+            self.index = VectorStoreIndex.from_documents(schema_docs, embed_model=self.embed_model)
+            self.query_engine = self.index.as_query_engine()
+            # self._print_vector_store_samples(num_samples=1) # Optional: for debugging
+            logging.info("Vector Store Index initialized successfully.")
+        except Exception as e:
+            logging.error(f"Error initializing Vector Store Index: {e}", exc_info=True)
+            if self.conn:
+                self.conn.close()
+            raise
+
+    def _analyze_column(self, col_name, table_name, sample_data):
+        """Analyzes a single column using the LLM."""
+        combined_prompt = f"""
+        Briefly describe column '{col_name}' in table '{table_name}':
+        - Purpose
+        - Data type
+        - Sample values: {sample_data[:3]}
+
+        Keep the response under 2 sentences.
+        """
+        try:
+            response = self.llm.predict(PromptTemplate(template=combined_prompt))
+            doc_text = (
+                f"Table: {table_name}\n"
+                f"Column: {col_name}\n"
+                f"Summary: {response.strip()}"
+            )
+            return doc_text
+        except Exception as e:
+            logging.error(f"Error analyzing column {table_name}.{col_name}: {e}", exc_info=True)
+            # Return a basic doc text even if LLM fails
+            return f"Table: {table_name}\nColumn: {col_name}\nSummary: Analysis failed."
+
+    def _process_table(self, table_info: Tuple[str, List[Tuple], List[Tuple], dict]) -> Tuple[str, List[Document]]:
+        """Processes a single table and its columns."""
+        table_name, columns, sample_data, column_indices = table_info
+        table_schema = f"Table: {table_name}\n"
+        schema_documents = []
+        logging.debug(f"Processing table: {table_name}")
+
+        for col in columns:
+            col_name = col[1]
+            col_type = col[2]
+            table_schema += f"  - {col_name} ({col_type})\n"
+            
+            col_samples = [row[column_indices[col_name]] for row in sample_data if len(row) > column_indices[col_name]]
+            
+            doc_text = self._analyze_column(col_name, table_name, col_samples)
+            schema_documents.append(Document(text=doc_text))
         
-        cursor.execute(f"SELECT * FROM {table_name} LIMIT 50")  # Reduced from 100 to 50
-        sample_data = cursor.fetchall()
-        
-        column_indices = {col[1]: idx for idx, col in enumerate(columns)}
-        table_data.append((table_name, columns, sample_data, column_indices))
-    
-    # Process tables in parallel
-    full_schema = ""
-    schema_documents = []
-    
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-        future_to_table = {
-            executor.submit(process_table, table_info, llm): table_info[0]
-            for table_info in table_data
-        }
-        
-        for future in concurrent.futures.as_completed(future_to_table):
-            table_name = future_to_table[future]
+        table_schema += "\n"
+        return table_schema, schema_documents
+
+    def _load_db_schema_and_column_summaries(self) -> Tuple[str, List[Document], sqlite3.Connection]:
+        """Loads database schema and generates summaries with parallel processing and caching."""
+        if os.path.exists(self.cache_file):
+            logging.info(f"Loading cached schema analysis from {self.cache_file}...")
             try:
-                table_schema, table_docs = future.result()
-                full_schema += table_schema
-                schema_documents.extend(table_docs)
-                print(f"Completed processing table: {table_name}")
-            except Exception as e:
-                print(f"Error processing table {table_name}: {e}")
-    
-    # Save to cache
-    cache = {
-        'schema': full_schema,
-        'documents': [doc.text for doc in schema_documents]
-    }
-    with open(cache_file, 'w') as f:
-        json.dump(cache, f)
-    
-    print("\nSchema analysis complete!")
-    return full_schema, schema_documents, conn
+                with open(self.cache_file, 'r') as f:
+                    cache = json.load(f)
+                    conn = sqlite3.connect(self.db_path, check_same_thread=False) # Ensure thread safety for Flask
+                    return cache['schema'], [Document(text=doc) for doc in cache['documents']], conn
+            except (json.JSONDecodeError, KeyError, sqlite3.Error) as e:
+                 logging.warning(f"Failed to load or parse cache file {self.cache_file}: {e}. Re-generating schema.", exc_info=True)
+                 # If cache is invalid, proceed to generate fresh schema
 
-# ------------------------------
-# Function: Generate SQL Query
-# ------------------------------
-def generate_sql_query(user_question, full_schema, query_engine, llm, conversation_history=None):
-    """
-    Generate SQL query using context from LlamaIndex and schema information.
-    Now includes conversation history for context.
-    """
-    # Retrieve relevant context from LlamaIndex
-    retrieved_context = str(query_engine.query(user_question))
-
-    # Get conversation history if available
-    history_context = ""
-    if conversation_history:
-        history_context = conversation_history.get_formatted_history()
-
-    # Construct the prompt with developer instructions and example
-    developer_msg = (
-        "You will be provided with a user query.\n"
-        "Your goal is to generate a valid SQL query to provide the best answer to the user.\n\n"
-        "This is the table schema:\n"
-        f"{full_schema}\n\n"
-        f"{history_context}\n"  # Add conversation history
-        "Use this schema to generate as an output the SQL query.\n\n"
-        "For example:\n\n"
-        "USER INPUT: Show me the total revenue for each region for sales made in 2024.\n"
-        "OUTPUT: SELECT Region, SUM(Quantity * Price) AS TotalRevenue\n"
-        "FROM Sales\n"
-        "WHERE Date BETWEEN '2024-01-01' AND '2024-12-31'\n"
-        "GROUP BY Region;\n\n"
-    )
-    
-    # Combine all context and user question
-    user_msg = f"USER INPUT: {user_question}"
-    prompt_str = developer_msg + "Retrieved Context:\n" + retrieved_context + "\n\n" + user_msg
-
-    # Generate SQL query using LLM
-    prompt = PromptTemplate(template=prompt_str)
-    response = llm.predict(prompt)
-    
-    # Extract SQL query from response
-    final_sql = None
-    for line in response.splitlines():
-        if line.strip().startswith("OUTPUT:"):
-            final_sql = line.strip()[len("OUTPUT:"):].strip()
-            break
-    if final_sql is None:
-        final_sql = response.strip()
+        conn = sqlite3.connect(self.db_path, check_same_thread=False) # Ensure thread safety for Flask
+        cursor = conn.cursor()
         
-    return final_sql, response
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+        tables = cursor.fetchall()
+        logging.info(f"Found {len(tables)} tables. Analyzing schema...")
 
-# ------------------------------
-# Function: Generate Analysis
-# ------------------------------
-def generate_analysis(sql_query, query_results, full_schema, llm, user_question, conversation_history=None):
-    """
-    Generate analysis of query results in the context of the original question.
-    Now includes comparative analysis with previous interactions.
-    """
-    # Get relevant previous interaction for comparison
-    previous_context = ""
-    if conversation_history and conversation_history.history:
-        previous_interaction = conversation_history.history[-1]
-        previous_context = f"""
-Previous interaction:
-Question: {previous_interaction['question']}
-Results: {previous_interaction['results']}
+        table_data = []
+        for table in tables:
+            table_name = table[0]
+            try:
+                cursor.execute(f"PRAGMA table_info(\"{table_name}\");") # Use quotes for safety
+                columns = cursor.fetchall()
+                cursor.execute(f"SELECT * FROM \"{table_name}\" LIMIT 50;")
+                sample_data = cursor.fetchall()
+                column_indices = {col[1]: idx for idx, col in enumerate(columns)}
+                table_data.append((table_name, columns, sample_data, column_indices))
+            except sqlite3.Error as e:
+                logging.error(f"Error fetching schema or data for table {table_name}: {e}", exc_info=True)
+                # Continue with other tables if one fails
+
+        full_schema = ""
+        schema_documents = []
+        # Use ThreadPoolExecutor for parallel processing
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(5, len(table_data) if table_data else 1)) as executor:
+            future_to_table = {
+                executor.submit(self._process_table, table_info): table_info[0]
+                for table_info in table_data
+            }
+            for future in concurrent.futures.as_completed(future_to_table):
+                table_name = future_to_table[future]
+                try:
+                    table_schema, table_docs = future.result()
+                    full_schema += table_schema
+                    schema_documents.extend(table_docs)
+                    logging.info(f"Completed processing table: {table_name}")
+                except Exception as e:
+                    logging.error(f"Error processing table {table_name} in thread: {e}", exc_info=True)
+
+        # Save to cache
+        try:
+            cache = {
+                'schema': full_schema,
+                'documents': [doc.text for doc in schema_documents]
+            }
+            with open(self.cache_file, 'w') as f:
+                json.dump(cache, f, indent=4)
+            logging.info(f"Schema analysis complete and saved to {self.cache_file}.")
+        except IOError as e:
+            logging.error(f"Error saving cache file {self.cache_file}: {e}", exc_info=True)
+
+        return full_schema, schema_documents, conn
+
+    def _validate_question(self, user_question: str) -> Dict:
+        """
+        Uses LLM to validate if the question needs SQL, can be answered directly,
+        or requires clarification.
+        """
+        logging.info(f"Validating question: '{user_question}'")
+        history_context = self.conversation_history.get_formatted_history()
+
+        validation_prompt_str = f"""
+You are an AI assistant helping determine how to answer a user's question based on available database schema and conversation history.
+
+Database Schema Summary:
+{self.full_schema}
+
+Conversation History:
+{history_context}
+
+User Question: "{user_question}"
+
+Analyze the user question in the context of the schema and history. Determine ONE of the following actions:
+
+1.  **SQL_NEEDED**: The question requires querying the database.
+2.  **DIRECT_ANSWER**: The question can be answered directly using the provided schema summary, conversation history, or general knowledge (e.g., it's a greeting or a question about the AI itself). If choosing this, provide the direct answer.
+3.  **CLARIFICATION_NEEDED**: The question is ambiguous, lacks specifics needed for a query (e.g., needs date ranges, specific IDs), or refers to information clearly not in the schema or history. If choosing this, suggest what clarification is needed.
+
+Respond ONLY with the chosen action label (SQL_NEEDED, DIRECT_ANSWER, or CLARIFICATION_NEEDED) followed by a colon and the answer/clarification if applicable.
+
+Examples:
+User Question: "What are the total sales for product ID 5?"
+OUTPUT: SQL_NEEDED:
+
+User Question: "Hello there!"
+OUTPUT: DIRECT_ANSWER: Hello! How can I help you with the Adventure Works data today?
+
+User Question: "Show me the recent orders."
+OUTPUT: CLARIFICATION_NEEDED: Could you please specify what you mean by 'recent'? For example, provide a date range (like 'last month' or 'since January 1st, 2024').
+
+User Question: "Can you tell me about the company CEO?"
+OUTPUT: DIRECT_ANSWER: I can only answer questions about the data in the Adventure Works database schema provided. I don't have information about the company's personnel like the CEO.
+
+User Question: "What tables do we have?"
+OUTPUT: DIRECT_ANSWER: The database contains tables like: [List a few table names from the schema].
+
+Now, analyze the current user question.
+
+OUTPUT:""" # Ensure the LLM starts its response right after this.
+
+        try:
+            prompt = PromptTemplate(template=validation_prompt_str)
+            response = self.llm.predict(prompt).strip()
+            logging.debug(f"Validation LLM response: {response}")
+
+            parts = response.split(":", 1)
+            action = parts[0].strip()
+            details = parts[1].strip() if len(parts) > 1 else ""
+
+            if action in ["SQL_NEEDED", "DIRECT_ANSWER", "CLARIFICATION_NEEDED"]:
+                return {"action": action, "details": details}
+            else:
+                # Handle unexpected LLM response format
+                logging.warning(f"Unexpected validation response format: {response}. Defaulting to SQL_NEEDED.")
+                # Fallback: Assume SQL is needed if unsure, or maybe ask for clarification.
+                # Let's default to SQL_NEEDED as it was the original behavior.
+                return {"action": "SQL_NEEDED", "details": ""}
+        except Exception as e:
+            logging.error(f"Error during question validation LLM call: {e}", exc_info=True)
+            # Fallback in case of API error
+            return {"action": "SQL_NEEDED", "details": ""} # Default to SQL needed on error
+
+    def _generate_sql_query(self, user_question: str) -> Tuple[Optional[str], str]:
+        """Generates SQL query using context from LlamaIndex and schema information."""
+        logging.info(f"Generating SQL for question: '{user_question}'")
+        try:
+            retrieved_context = str(self.query_engine.query(user_question))
+            logging.debug(f"Retrieved context for SQL generation: {retrieved_context}")
+        except Exception as e:
+             logging.error(f"Error retrieving context from query engine: {e}", exc_info=True)
+             retrieved_context = "Context retrieval failed." # Provide fallback context
+
+        history_context = self.conversation_history.get_formatted_history()
+
+        developer_msg = f"""You are an expert SQL generator. You will be provided with a user query, database schema, conversation history, and retrieved context.
+Your goal is to generate a single, valid SQL query (compatible with SQLite) to provide the best answer to the user's most recent question.
+
+Database Schema:
+{self.full_schema}
+
+Conversation History:
+{history_context}
+
+Retrieved Context (Information potentially relevant to the user query):
+{retrieved_context}
+
+Based on all the above, generate ONLY the SQL query for the following user input.
+- Do not include explanations or 'OUTPUT:'. Just the SQL.
+- For questions asking for the "top N", "highest", "lowest", "most", or "least", use ORDER BY with DESC or ASC and LIMIT N.
+
+Examples:
+
+-- Simple Query --
+USER INPUT: Show me the total revenue for each region for sales made in 2024.
+GENERATED SQL: SELECT Region, SUM(Quantity * Price) AS TotalRevenue FROM Sales WHERE Date BETWEEN '2024-01-01' AND '2024-12-31' GROUP BY Region;
+
+-- Complex Query (Top N) --
+USER INPUT: What are the top 3 products with the most sales quantity in 2023?
+GENERATED SQL: SELECT p.ProductName, SUM(s.OrderQuantity) AS TotalQuantity
+FROM AdventureWorks_Sales_2023 s
+JOIN AdventureWorks_Products p ON s.ProductKey = p.ProductKey
+GROUP BY p.ProductName
+ORDER BY TotalQuantity DESC
+LIMIT 3;
 """
 
-    analysis_prompt_str = f"""
-You are a helpful data analyst having a conversation with a user. Analyze the query results and provide a natural, conversational response.
+        user_msg = f"USER INPUT: {user_question}"
+        prompt_str = developer_msg + "\n" + user_msg + "\nGENERATED SQL:" # Guide the LLM output
 
-Context:
+        try:
+            prompt = PromptTemplate(template=prompt_str)
+            response = self.llm.predict(prompt).strip()
+            logging.debug(f"SQL Generation LLM response: {response}")
+
+            # Basic validation/cleanup of the generated SQL
+            final_sql = response
+            # Remove potential markdown backticks
+            if final_sql.startswith("```sql"):
+                final_sql = final_sql[len("```sql"):].strip()
+            if final_sql.endswith("```"):
+                final_sql = final_sql[:-len("```")].strip()
+            # Remove potential leading/trailing semicolons if they cause issues, though usually fine for execute()
+            final_sql = final_sql.strip().rstrip(';')
+
+            logging.info(f"Generated SQL: {final_sql}")
+            return final_sql, response # Return both raw and cleaned
+        except Exception as e:
+            logging.error(f"Error during SQL generation LLM call: {e}", exc_info=True)
+            return None, f"Error generating SQL: {e}"
+
+    def _execute_sql_query(self, sql_query: str) -> Union[List[Tuple], str]:
+        """Executes the generated SQL query against the database."""
+        logging.info(f"Executing SQL: {sql_query}")
+        if not self.cursor:
+             logging.error("Database cursor is not initialized.")
+             return "Error: Database connection is not available."
+        try:
+            self.cursor.execute(sql_query)
+            results = self.cursor.fetchall()
+            # Limit results for display/analysis if necessary
+            # if len(results) > 100:
+            #     logging.warning(f"Query returned {len(results)} rows. Truncating for analysis.")
+            #     # return results[:100] # Optionally truncate here or in analysis prompt
+            logging.info(f"Query executed successfully, {len(results)} rows returned.")
+            return results
+        except sqlite3.Error as e:
+            logging.error(f"Error executing SQL query: {e}", exc_info=True)
+            return f"Error executing query: {e}"
+        except Exception as e: # Catch other potential errors
+            logging.error(f"An unexpected error occurred during query execution: {e}", exc_info=True)
+            return f"An unexpected error occurred: {e}"
+
+    def _generate_analysis(self, user_question: str, sql_query: str, query_results: Union[List[Tuple], str]) -> str:
+        """Generates a natural language analysis of the query results."""
+        logging.info("Generating analysis for query results.")
+        history_context = self.conversation_history.get_formatted_history()
+
+        # Format results nicely for the prompt
+        if isinstance(query_results, str): # Error message
+            formatted_results = query_results
+        elif not query_results:
+             formatted_results = "The query returned no results."
+        else:
+            # Convert results to a more readable string format, maybe limit rows
+            headers = [desc[0] for desc in self.cursor.description] if self.cursor.description else []
+            results_str = "Headers: " + ", ".join(headers) + "\n"
+            results_str += "\n".join([str(row) for row in query_results[:20]]) # Limit rows in prompt
+            if len(query_results) > 20:
+                results_str += f"\n... (truncated, {len(query_results)} total rows)"
+            formatted_results = results_str
+
+        analysis_prompt_str = f"""
+You are LumenAI, a helpful data analyst AI. Your goal is to provide a clear, concise, and natural language response to the user's question based on the executed SQL query and its results. Incorporate context from the conversation history if relevant.
+
+Conversation History:
+{history_context}
+
+Most Recent Interaction:
 - User Question: {user_question}
-- Query Results: {query_results}
-{previous_context}
+- SQL Query Executed: {sql_query}
+- Query Results:
+{formatted_results}
 
 Guidelines for your response:
-1. Start with a direct answer to the question
-2. Format numbers in a readable way (e.g., 1,234,567 instead of 1234567)
-3. If there's previous context:
-   - Compare with previous results
-   - Highlight any interesting changes or trends
-   - Use phrases like "compared to", "increased/decreased by", "higher/lower than"
-4. Add relevant insights or observations
-5. Keep the tone conversational but professional
-6. If the results show a significant change, suggest possible factors
+1.  **Directly Address the Question**: Start by answering the user's original question based on the results.
+2.  **Summarize Key Findings**: Briefly explain what the data shows.
+3.  **Format Clearly**: Use formatting (like lists or bolding) if it improves readability. Format numbers understandably (e.g., use commas).
+4.  **Contextualize (If Applicable)**: If the conversation history provides relevant context (e.g., comparing to a previous query), mention it briefly (e.g., "Compared to last month...", "This is an increase from...").
+5.  **Handle Errors/No Results Gracefully**: If the results indicate an error or are empty, state that clearly and perhaps suggest alternatives or checking the query.
+6.  **Be Concise**: Keep the analysis focused and avoid unnecessary jargon.
+7.  **Conversational Tone**: Maintain a helpful and professional yet conversational style.
 
-Example style:
-"The sales for 2017 were 47,000 units, which is 2,000 units higher than 2016's 45,000 units. This 4.4% increase might be attributed to the new product launches in Q2 2017."
+Example (Good Analysis):
+"Based on the data, the total sales for the 'Bikes' category in 2023 amounted to $1,234,567. This represents a 15% increase compared to the $1,073,536 in sales for 2022."
 
-Please provide your analysis:
+Example (Handling No Results):
+"The query didn't find any sales records for Product ID 999 in the specified date range."
+
+Example (Handling Error):
+"There was an error when trying to run the query: [Error message]. This might be due to an issue with the generated SQL. Would you like me to try rephrasing the query?"
+
+Now, generate the analysis for the user:
 """
-    
-    analysis_prompt = PromptTemplate(template=analysis_prompt_str)
-    return llm.predict(analysis_prompt)
 
-# ------------------------------
-# Function: Print Vector Store Samples
-# ------------------------------
-def print_vector_store_samples(index, num_samples=3):
-    """
-    Print sample documents from the vector store to see what information is stored.
-    """
-    print("\n" + "="*80)
-    print("VECTOR STORE SAMPLES:")
-    print("="*80)
-    
-    # Get all documents from the index
-    documents = index.docstore.docs.values()
-    
-    # Print first num_samples documents
-    for i, doc in enumerate(list(documents)[:num_samples]):
-        print(f"\nSample Document {i+1}:")
-        print("-"*40)
-        print(doc.text)
-        print("-"*40)
-    
-    print("\n" + "="*80 + "\n")
-
-# ------------------------------
-# Main Application
-# ------------------------------
-def main():
-    # Initialize LLM with optimized settings
-    Settings.llm = OpenAI(
-        temperature=0.01,
-        max_new_tokens=500,
-        model="o3-mini",
-        request_timeout=30
-    )
-    llm = Settings.llm
-
-    # Initialize conversation history
-    conversation_history = ConversationHistory()
-
-    # Load database and generate schema documents
-    db_path = "./output/adventure_works.db"
-    full_schema, schema_docs, conn = load_db_schema_and_column_summaries(db_path, llm)
-
-    # Initialize LlamaIndex with documents
-    embed_model = HuggingFaceEmbedding(model_name="all-MiniLM-L6-v2")
-    index = VectorStoreIndex.from_documents(schema_docs, embed_model=embed_model)
-    query_engine = index.as_query_engine()
-
-    # Print samples from vector store
-    print_vector_store_samples(index)
-
-    # Initialize database cursor
-    cursor = conn.cursor()
-    print("SQLite database loaded successfully.\n")
-    print("Database Schema:")
-    print(full_schema)
-
-    # Interactive query loop
-    while True:
-        user_question = input("Ask any question about the data (or type 'exit' to quit): ")
-        if user_question.lower() in ["exit", "quit"]:
-            break
-
-        # Generate and execute query with conversation history
-        final_sql_query, full_response = generate_sql_query(
-            user_question, 
-            full_schema, 
-            query_engine, 
-            llm,
-            conversation_history
-        )
-        print("\nGenerated SQL Query:")
-        print(final_sql_query)
-
-        # Execute query and handle results
         try:
-            cursor.execute(final_sql_query)
-            query_results = cursor.fetchall()
+            analysis_prompt = PromptTemplate(template=analysis_prompt_str)
+            analysis = self.llm.predict(analysis_prompt).strip()
+            logging.info("Analysis generated successfully.")
+            logging.debug(f"Generated Analysis: {analysis}")
+            return analysis
         except Exception as e:
-            query_results = f"Error executing query: {e}"
-        print("\nQuery Results:")
-        print(query_results)
+            logging.error(f"Error during analysis generation LLM call: {e}", exc_info=True)
+            return f"Error generating analysis: {e}"
 
-        # Generate analysis of results with conversation history
-        analysis = generate_analysis(
-            final_sql_query, 
-            query_results, 
-            full_schema, 
-            llm, 
-            user_question,
-            conversation_history
-        )
-        print("\nAnalysis:")
-        print(analysis)
-        print("\n" + "-" * 60 + "\n")
+    def process_query(self, user_question: str) -> Dict[str, Optional[str]]:
+        """
+        Processes the user's question: validates, potentially clarifies,
+        generates/executes SQL, and returns analysis or response.
+        """
+        logging.info(f"Processing user query: '{user_question}'")
 
-        # Add the interaction to conversation history
-        conversation_history.add_interaction(
-            user_question,
-            final_sql_query,
-            str(query_results),
-            analysis
-        )
+        validation_result = self._validate_question(user_question)
+        action = validation_result["action"]
+        details = validation_result["details"]
 
-    # Cleanup
-    conn.close()
-    print("Application exited.")
+        response = {"type": action, "message": None, "sql_query": None}
 
-if __name__ == "__main__":
-    main()
+        if action == "DIRECT_ANSWER":
+            logging.info("Action: DIRECT_ANSWER")
+            response["message"] = details
+            self.conversation_history.add_interaction(
+                question=user_question,
+                response_type="direct_answer",
+                analysis=details
+            )
+
+        elif action == "CLARIFICATION_NEEDED":
+            logging.info("Action: CLARIFICATION_NEEDED")
+            response["message"] = details
+            # Don't add to history until clarification is resolved, or add with a specific type
+            self.conversation_history.add_interaction(
+                 question=user_question,
+                 response_type="clarification_needed",
+                 analysis=details # Store the clarification question asked
+            )
+
+        elif action == "SQL_NEEDED":
+            logging.info("Action: SQL_NEEDED")
+            sql_query, raw_llm_sql_response = self._generate_sql_query(user_question)
+            response["sql_query"] = sql_query # Include the generated SQL in the response
+
+            if sql_query:
+                query_results = self._execute_sql_query(sql_query)
+                analysis = self._generate_analysis(user_question, sql_query, query_results)
+                response["message"] = analysis
+                self.conversation_history.add_interaction(
+                    question=user_question,
+                    response_type="sql_analysis",
+                    sql_query=sql_query,
+                    results=str(query_results) if not isinstance(query_results, str) else query_results, # Store results as string
+                    analysis=analysis
+                )
+            else:
+                logging.error("SQL generation failed.")
+                response["message"] = "I encountered an error trying to generate the SQL query needed to answer your question."
+                # Add error interaction to history
+                self.conversation_history.add_interaction(
+                    question=user_question,
+                    response_type="error",
+                    analysis=response["message"]
+                 )
+
+        else: # Should not happen based on _validate_question logic
+            logging.error(f"Invalid action '{action}' received from validation.")
+            response["type"] = "error"
+            response["message"] = "An unexpected internal error occurred during question validation."
+            self.conversation_history.add_interaction(
+                question=user_question,
+                response_type="error",
+                analysis=response["message"]
+            )
+
+        logging.info(f"Finished processing query. Response type: {response['type']}")
+        return response
+
+    def _print_vector_store_samples(self, num_samples=3):
+        """Prints sample documents from the vector store."""
+        if not self.index or not self.index.docstore:
+            logging.warning("Vector store not initialized or empty. Cannot print samples.")
+            return
+
+        logging.debug("\n" + "="*80)
+        logging.debug("VECTOR STORE SAMPLES:")
+        logging.debug("="*80)
+        try:
+            documents = list(self.index.docstore.docs.values())
+            if not documents:
+                logging.debug("No documents found in the vector store.")
+                return
+
+            for i, doc in enumerate(documents[:num_samples]):
+                logging.debug(f"\nSample Document {i+1}:")
+                logging.debug("-"*40)
+                logging.debug(doc.text)
+                logging.debug("-"*40)
+
+            logging.debug("\n" + "="*80 + "\n")
+        except Exception as e:
+            logging.error(f"Error accessing vector store documents: {e}", exc_info=True)
+
+    def close_connection(self):
+        """Closes the database connection."""
+        if self.conn:
+            self.conn.close()
+            logging.info("Database connection closed.")
+
+# Note: The main execution block (`if __name__ == "__main__":`)
+# has been removed as this script will now be imported and used by the server.
+# You would typically instantiate and use the TextToSqlAgent from your Flask app.

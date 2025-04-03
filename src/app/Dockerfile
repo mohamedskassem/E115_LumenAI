@@ -11,8 +11,8 @@ RUN pip install pipenv && pipenv install --system
 # Copy the rest of your application code.
 COPY . .
 
-# Expose any ports if needed (optional)
-# EXPOSE 8080
+# Expose port 5000 for the Flask app
+EXPOSE 5000
 
 # Run the application.
-CMD ["python", "app.py"]
+CMD ["python", "server.py"]
