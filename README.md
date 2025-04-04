@@ -54,7 +54,7 @@ graph LR
         C -- Load Schema / Analyze --> G[OpenAI GPT-4 Turbo];
     end
     subgraph Query Processing
-         C -- LLM Call (Validate/SQL/Analyze) --> H[Configured LLM (e.g., Gemini)];
+         C -- "LLM Call (Validate/SQL/Analyze)" --> H[Configured LLM (e.g., Gemini)];
          C -- Retrieve Context --> E[Vector Index];
          C -- Execute SQL --> F[SQLite DB];
     end
