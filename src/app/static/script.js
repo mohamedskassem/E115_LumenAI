@@ -51,18 +51,36 @@ document.addEventListener('DOMContentLoaded', () => {
         const messageDiv = document.createElement('div');
         messageDiv.classList.add('message');
 
+        let messageContent = text; // Store original text
+
         if (sender === 'user') {
             messageDiv.classList.add('user-message');
+            // User messages typically don't need markdown rendering, keep simple text
+            messageDiv.innerHTML = `<p>${messageContent}</p>`;
         } else if (isError) {
             messageDiv.classList.add('error-message');
-            text = `<strong>Error:</strong> ${text}`;
-        } else {
+            messageContent = `<strong>Error:</strong> ${text}`;
+            // Render error message HTML directly
+            messageDiv.innerHTML = `<p>${messageContent}</p>`; 
+        } else { // Bot message or system message
             messageDiv.classList.add('bot-message');
+            // Use marked.parse() to convert markdown to HTML
+            // Use DOMPurify if available for security (recommended, but needs another library)
+            try {
+                messageDiv.innerHTML = marked.parse(messageContent);
+            } catch (e) {
+                console.error("Error parsing markdown:", e);
+                // Fallback to plain text rendering if marked.js fails
+                const fallbackP = document.createElement('p');
+                fallbackP.textContent = messageContent;
+                messageDiv.appendChild(fallbackP);
+            }
+             // If sender is 'system', maybe add another class? (Optional)
+            if (sender === 'system') {
+                 messageDiv.classList.add('system-message'); // Add this class for potential specific styling
+            }
         }
 
-        // Basic Markdown-like formatting for newlines
-        const formattedText = text.replace(/\n/g, '<br>');
-        messageDiv.innerHTML = `<p>${formattedText}</p>`; // Use innerHTML to render <br>
         chatbox.appendChild(messageDiv);
 
         // Scroll to the bottom

@@ -240,6 +240,13 @@ class TextToSqlAgent:
 
     def _analyze_column(self, col_name, table_name, sample_data, llm):
         """Analyzes a single column using the provided LLM instance."""
+        
+        # Handle case where LLM initialization might have failed
+        if llm is None:
+             logging.warning(f"LLM not available for analyzing column {table_name}.{col_name}. Returning basic info.")
+             # Provide a basic summary without LLM analysis
+             return f"Table: {table_name}\nColumn: {col_name}\nSummary: (LLM analysis not available)"
+
         combined_prompt = f"""
         Briefly describe column '{col_name}' in table '{table_name}':
         - Purpose
@@ -249,6 +256,8 @@ class TextToSqlAgent:
         Keep the response under 2 sentences.
         """
         try:
+            # Use .complete for newer LlamaIndex versions if .predict is deprecated
+            # Assuming .predict is still valid for the version in use based on original code
             response = llm.predict(PromptTemplate(template=combined_prompt))
             doc_text = (
                 f"Table: {table_name}\n"
@@ -258,10 +267,10 @@ class TextToSqlAgent:
             return doc_text
         except Exception as e:
             logging.error(
-                f"Error analyzing column {table_name}.{col_name}: {e}", exc_info=True
+                f"Error analyzing column {table_name}.{col_name} with LLM {type(llm)}: {e}", exc_info=True
             )
             # Return a basic doc text even if LLM fails
-            return f"Table: {table_name}\nColumn: {col_name}\nSummary: Analysis failed."
+            return f"Table: {table_name}\nColumn: {col_name}\nSummary: Analysis failed due to error."
 
     def _process_table(
         self, table_info: Tuple[str, List[Tuple], List[Tuple], dict], llm
@@ -293,6 +302,7 @@ class TextToSqlAgent:
         self,
     ) -> Tuple[str, List[Document], sqlite3.Connection]:
         """Loads database schema and generates summaries with parallel processing and caching."""
+        # Attempt to load from cache first
         if os.path.exists(self.cache_file):
             logging.info(f"Loading cached schema analysis from {self.cache_file}...")
             try:
@@ -313,6 +323,25 @@ class TextToSqlAgent:
                 )
                 # If cache is invalid, proceed to generate fresh schema
 
+        # --- Initialize dedicated LLM for schema analysis ---
+        schema_analysis_model_name = "gpt-4-turbo" # Specify the model here
+        schema_analysis_llm = None
+        try:
+            # Temporarily use OpenAI for schema analysis
+            logging.info(f"Initializing {schema_analysis_model_name} specifically for schema analysis...")
+            schema_analysis_llm = OpenAI(
+                 model=schema_analysis_model_name,
+                 temperature=0.01, 
+                 # Add other necessary OpenAI parameters if needed (e.g., max_tokens)
+            )
+            if not os.environ.get("OPENAI_API_KEY"):
+                raise ValueError("OpenAI API Key not found, needed for schema analysis.")
+        except Exception as e:
+             logging.error(f"Failed to initialize {schema_analysis_model_name} for schema analysis: {e}. Schema summaries will be basic.", exc_info=True)
+             # Fallback? Could proceed without LLM analysis, resulting in basic schema docs.
+             # For now, we'll let it proceed, but _analyze_column will handle the missing LLM.
+        # ---------------------------------------------------
+
         conn = sqlite3.connect(
             self.db_path, check_same_thread=False
         )  # Ensure thread safety for Flask
@@ -320,7 +349,7 @@ class TextToSqlAgent:
 
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
         tables = cursor.fetchall()
-        logging.info(f"Found {len(tables)} tables. Analyzing schema...")
+        logging.info(f"Found {len(tables)} tables. Analyzing schema (using {schema_analysis_model_name or 'default LLM'})...")
 
         table_data = []
         for table in tables:
@@ -344,13 +373,14 @@ class TextToSqlAgent:
         full_schema = ""
         schema_documents = []
         # Use ThreadPoolExecutor for parallel processing
+        # --- Using the dedicated schema_analysis_llm --- 
         with concurrent.futures.ThreadPoolExecutor(
-            max_workers=min(5, len(table_data) if table_data else 1)
+             # Reduced parallelism to potentially avoid rate limits even on GPT-4
+             max_workers=2 # Adjusted max_workers
         ) as executor:
             future_to_table = {
-                # Use the default LLM for schema analysis during startup
                 executor.submit(
-                    self._process_table, table_info, self.default_llm
+                    self._process_table, table_info, schema_analysis_llm # Pass the dedicated LLM
                 ): table_info[0]
                 for table_info in table_data
             }
@@ -366,6 +396,7 @@ class TextToSqlAgent:
                         f"Error processing table {table_name} in thread: {e}",
                         exc_info=True,
                     )
+        # -----------------------------------------------
 
         # Save to cache
         try:

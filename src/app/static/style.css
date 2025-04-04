@@ -387,4 +387,19 @@ body {
 .remove-button:hover {
     background-color: #ffe5cc;
     border-color: #ff8000;
+}
+
+/* --- System Message Styles --- */
+.system-message {
+    /* background-color: #f0f0f5; Slightly different background */
+    font-style: italic;
+    color: #6e6e73; /* Medium grey text */
+    align-self: center; /* Center system messages */
+    max-width: 90%; /* Allow wider system messages */
+    text-align: center;
+    /* Add other styles as needed */
+}
+
+.system-message p { /* Target the paragraph within if marked.js wraps it */
+    margin: 0; /* Remove default paragraph margin */
 } 
