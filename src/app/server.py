@@ -20,7 +20,7 @@ DB_NAME = 'user_data.db'
 DB_PATH = os.path.join(DB_FOLDER, DB_NAME)
 SCHEMA_CACHE_FILE = 'schema_cache.json'
 VECTOR_STORE_CACHE_DIR = 'vector_store_cache'
-DEFAULT_LLM_MODEL = "gpt-4-turbo"
+DEFAULT_LLM_MODEL = "gemini-2.5-pro-exp-03-25"
 
 # Ensure directories exist
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)

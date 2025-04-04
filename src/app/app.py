@@ -1,11 +1,18 @@
 import os
 import sqlite3
 import json
-import shutil # For deleting directories
+import shutil  # For deleting directories
 import concurrent.futures
 from typing import List, Tuple, Dict, Optional, Union
 import logging
-from llama_index.core import VectorStoreIndex, Document, Settings, PromptTemplate, StorageContext, load_index_from_storage
+from llama_index.core import (
+    VectorStoreIndex,
+    Document,
+    Settings,
+    PromptTemplate,
+    StorageContext,
+    load_index_from_storage,
+)
 from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.llms.openai import OpenAI
 from llama_index.llms.gemini import Gemini
@@ -13,7 +20,9 @@ from llama_index.llms.gemini import Gemini
 # ------------------------------
 # Configure Logging
 # ------------------------------
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
 # ------------------------------
 # Load API Key from secrets
@@ -22,13 +31,16 @@ try:
     with open("secrets/openai_api_key.txt", "r") as key_file:
         os.environ["OPENAI_API_KEY"] = key_file.read().strip()
 except FileNotFoundError:
-    logging.error("API key file 'secrets/openai_api_key.txt' not found. Please create it.")
+    logging.error(
+        "API key file 'secrets/openai_api_key.txt' not found. Please create it."
+    )
     # Depending on the desired behavior, you might want to exit or raise an exception here.
     # For now, we'll proceed, but OpenAI calls will fail.
     pass
 
 # Disable tokenizer parallelism warnings
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 
 # ------------------------------
 # Conversation History Class
@@ -38,58 +50,77 @@ class ConversationHistory:
         self.history: List[Dict] = []
         self.max_history = max_history
         logging.info(f"ConversationHistory initialized with max_history={max_history}")
-    
-    def add_interaction(self, question: str, response_type: str, sql_query: Optional[str] = None, results: Optional[str] = None, analysis: Optional[str] = None):
+
+    def add_interaction(
+        self,
+        question: str,
+        response_type: str,
+        sql_query: Optional[str] = None,
+        results: Optional[str] = None,
+        analysis: Optional[str] = None,
+    ):
         interaction = {
             "question": question,
-            "response_type": response_type, # e.g., "sql_analysis", "direct_answer", "clarification_needed"
+            "response_type": response_type,  # e.g., "sql_analysis", "direct_answer", "clarification_needed"
             "sql_query": sql_query,
             "results": results,
-            "analysis": analysis
+            "analysis": analysis,
         }
         self.history.append(interaction)
         if len(self.history) > self.max_history:
             self.history.pop(0)
-        logging.debug(f"Added interaction to history. Current length: {len(self.history)}")
-    
+        logging.debug(
+            f"Added interaction to history. Current length: {len(self.history)}"
+        )
+
     def get_formatted_history(self) -> str:
         if not self.history:
             return ""
-        
+
         formatted = "Previous conversation context:\n"
         for i, interaction in enumerate(self.history, 1):
             formatted += f"Interaction {i}:\n"
             formatted += f"  User Question: {interaction['question']}\n"
-            if interaction['sql_query']:
+            if interaction["sql_query"]:
                 formatted += f"  SQL Generated: {interaction['sql_query']}\n"
-            if interaction['results']:
+            if interaction["results"]:
                 formatted += f"  Query Results: {interaction['results']}\n"
-            if interaction['analysis']:
+            if interaction["analysis"]:
                 formatted += f"  Response/Analysis: {interaction['analysis']}\n"
             formatted += "-" * 40 + "\n"
         return formatted
+
 
 # ------------------------------
 # TextToSqlAgent Class
 # ------------------------------
 class TextToSqlAgent:
-    def __init__(self, db_path: str, cache_file: str = "schema_cache.json", default_model: str = "gpt-4-turbo"):
+    def __init__(
+        self,
+        db_path: str,
+        cache_file: str = "schema_cache.json",
+        default_model: str = "gpt-4-turbo",
+    ):
         logging.info("Initializing TextToSqlAgent object...")
         # Configuration details stored, but initialization deferred
-        self.persist_dir = "vector_store_cache" # Directory to store the index
+        self.persist_dir = "vector_store_cache"  # Directory to store the index
         self.db_path = db_path
         self.cache_file = cache_file
-        self.default_model = default_model # Model for schema analysis and default queries
-        self.default_llm = None # LLM instance used for schema loading
-        self.initialized_llms: Dict[str, Union[OpenAI, Gemini]] = {} # Cache for dynamically loaded LLMs
-        self.embed_model = None # Initialized in load_and_index
-        self.index = None # Initialized in load_and_index
-        self.query_engine = None # Initialized in load_and_index
-        self.conn = None # Initialized in load_and_index
-        self.cursor = None # Initialized in load_and_index
-        self.full_schema = "" # Initialized in load_and_index
+        self.default_model = (
+            default_model  # Model for schema analysis and default queries
+        )
+        self.default_llm = None  # LLM instance used for schema loading
+        self.initialized_llms: Dict[
+            str, Union[OpenAI, Gemini]
+        ] = {}  # Cache for dynamically loaded LLMs
+        self.embed_model = None  # Initialized in load_and_index
+        self.index = None  # Initialized in load_and_index
+        self.query_engine = None  # Initialized in load_and_index
+        self.conn = None  # Initialized in load_and_index
+        self.cursor = None  # Initialized in load_and_index
+        self.full_schema = ""  # Initialized in load_and_index
         self.conversation_history = ConversationHistory()
-        self.is_initialized = False # Flag to track if indexing is complete
+        self.is_initialized = False  # Flag to track if indexing is complete
         # Defer actual initialization until load_and_index is called
 
     def load_and_index(self):
@@ -97,20 +128,28 @@ class TextToSqlAgent:
         if self.is_initialized:
             logging.info("Agent already initialized.")
             return True
-        
+
         if not os.path.exists(self.db_path):
-            logging.error(f"Database path does not exist: {self.db_path}. Cannot initialize.")
+            logging.error(
+                f"Database path does not exist: {self.db_path}. Cannot initialize."
+            )
             return False
-            
+
         logging.info(f"Starting initialization and indexing for DB: {self.db_path}")
         logging.info("Initializing LLM and Embeddings...")
         try:
             # Initialize the DEFAULT LLM (used for schema analysis)
             # Note: We don't set the global Settings.llm anymore
-            self.default_llm = self._get_llm(self.default_model) # Initialize default model immediately
+            self.default_llm = self._get_llm(
+                self.default_model
+            )  # Initialize default model immediately
             if not self.default_llm:
-                raise ValueError(f"Failed to initialize default LLM: {self.default_model}")
-            logging.info(f"Default LLM ({self.default_model}) initialized for agent startup tasks.")
+                raise ValueError(
+                    f"Failed to initialize default LLM: {self.default_model}"
+                )
+            logging.info(
+                f"Default LLM ({self.default_model}) initialized for agent startup tasks."
+            )
 
             # Initialize Embeddings
             logging.info("Initializing OpenAI Embeddings (text-embedding-3-small)...")
@@ -122,7 +161,11 @@ class TextToSqlAgent:
         logging.info("Loading DB schema and column summaries...")
         try:
             # Load database and generate schema documents
-            self.full_schema, schema_docs, self.conn = self._load_db_schema_and_column_summaries()
+            (
+                self.full_schema,
+                schema_docs,
+                self.conn,
+            ) = self._load_db_schema_and_column_summaries()
             self.cursor = self.conn.cursor()
             logging.info("Database schema loaded and connection established.")
             logging.debug(f"Full Schema:\n{self.full_schema}")
@@ -133,23 +176,34 @@ class TextToSqlAgent:
             raise
 
         logging.info("Initializing Vector Store Index...")
-        # --- Try Loading Index from Cache --- 
+        # --- Try Loading Index from Cache ---
         if os.path.exists(self.persist_dir):
-            if not self.embed_model: # Ensure embed model is initialized first
+            if not self.embed_model:  # Ensure embed model is initialized first
                 logging.error("Embed model not initialized before loading index.")
                 return False
             try:
-                logging.info(f"Loading existing vector store index from: {self.persist_dir}")
-                storage_context = StorageContext.from_defaults(persist_dir=self.persist_dir)
-                self.index = load_index_from_storage(storage_context, embed_model=self.embed_model)
+                logging.info(
+                    f"Loading existing vector store index from: {self.persist_dir}"
+                )
+                storage_context = StorageContext.from_defaults(
+                    persist_dir=self.persist_dir
+                )
+                self.index = load_index_from_storage(
+                    storage_context, embed_model=self.embed_model
+                )
                 self.query_engine = self.index.as_query_engine(response_mode="no_text")
                 logging.info("Vector Store Index loaded successfully from cache.")
             except Exception as e:
-                logging.warning(f"Failed to load index from cache ({self.persist_dir}): {e}. Rebuilding...", exc_info=True)
-                self._build_and_persist_index(schema_docs) # Fallback to building
+                logging.warning(
+                    f"Failed to load index from cache ({self.persist_dir}): {e}. Rebuilding...",
+                    exc_info=True,
+                )
+                self._build_and_persist_index(schema_docs)  # Fallback to building
         else:
-             logging.info(f"No existing vector store cache found at {self.persist_dir}. Building new index...")
-             self._build_and_persist_index(schema_docs)
+            logging.info(
+                f"No existing vector store cache found at {self.persist_dir}. Building new index..."
+            )
+            self._build_and_persist_index(schema_docs)
 
         self.is_initialized = True
         logging.info("Agent initialization and indexing complete.")
@@ -160,14 +214,16 @@ class TextToSqlAgent:
         try:
             # Temporarily set global LLM for index/engine setup, if needed by components
             # to prevent falling back to implicit OpenAI defaults.
-            original_llm = Settings.llm # Store original global (if any)
-            Settings.llm = self.default_llm # Use the agent's default LLM
+            original_llm = Settings.llm  # Store original global (if any)
+            Settings.llm = self.default_llm  # Use the agent's default LLM
 
             # Initialize LlamaIndex with documents
-            self.index = VectorStoreIndex.from_documents(schema_docs, embed_model=self.embed_model)
+            self.index = VectorStoreIndex.from_documents(
+                schema_docs, embed_model=self.embed_model
+            )
             # Configure query engine to only retrieve context, not synthesize text
             self.query_engine = self.index.as_query_engine(response_mode="no_text")
-            
+
             logging.info(f"Persisting index to: {self.persist_dir}")
             self.index.storage_context.persist(persist_dir=self.persist_dir)
 
@@ -201,11 +257,15 @@ class TextToSqlAgent:
             )
             return doc_text
         except Exception as e:
-            logging.error(f"Error analyzing column {table_name}.{col_name}: {e}", exc_info=True)
+            logging.error(
+                f"Error analyzing column {table_name}.{col_name}: {e}", exc_info=True
+            )
             # Return a basic doc text even if LLM fails
             return f"Table: {table_name}\nColumn: {col_name}\nSummary: Analysis failed."
 
-    def _process_table(self, table_info: Tuple[str, List[Tuple], List[Tuple], dict], llm) -> Tuple[str, List[Document]]:
+    def _process_table(
+        self, table_info: Tuple[str, List[Tuple], List[Tuple], dict], llm
+    ) -> Tuple[str, List[Document]]:
         """Processes a single table and its columns."""
         table_name, columns, sample_data, column_indices = table_info
         table_schema = f"Table: {table_name}\n"
@@ -216,31 +276,48 @@ class TextToSqlAgent:
             col_name = col[1]
             col_type = col[2]
             table_schema += f"  - {col_name} ({col_type})\n"
-            
-            col_samples = [row[column_indices[col_name]] for row in sample_data if len(row) > column_indices[col_name]]
-            
+
+            col_samples = [
+                row[column_indices[col_name]]
+                for row in sample_data
+                if len(row) > column_indices[col_name]
+            ]
+
             doc_text = self._analyze_column(col_name, table_name, col_samples, llm)
             schema_documents.append(Document(text=doc_text))
-        
+
         table_schema += "\n"
         return table_schema, schema_documents
 
-    def _load_db_schema_and_column_summaries(self) -> Tuple[str, List[Document], sqlite3.Connection]:
+    def _load_db_schema_and_column_summaries(
+        self,
+    ) -> Tuple[str, List[Document], sqlite3.Connection]:
         """Loads database schema and generates summaries with parallel processing and caching."""
         if os.path.exists(self.cache_file):
             logging.info(f"Loading cached schema analysis from {self.cache_file}...")
             try:
-                with open(self.cache_file, 'r') as f:
+                with open(self.cache_file, "r") as f:
                     cache = json.load(f)
-                    conn = sqlite3.connect(self.db_path, check_same_thread=False) # Ensure thread safety for Flask
-                    return cache['schema'], [Document(text=doc) for doc in cache['documents']], conn
+                    conn = sqlite3.connect(
+                        self.db_path, check_same_thread=False
+                    )  # Ensure thread safety for Flask
+                    return (
+                        cache["schema"],
+                        [Document(text=doc) for doc in cache["documents"]],
+                        conn,
+                    )
             except (json.JSONDecodeError, KeyError, sqlite3.Error) as e:
-                 logging.warning(f"Failed to load or parse cache file {self.cache_file}: {e}. Re-generating schema.", exc_info=True)
-                 # If cache is invalid, proceed to generate fresh schema
+                logging.warning(
+                    f"Failed to load or parse cache file {self.cache_file}: {e}. Re-generating schema.",
+                    exc_info=True,
+                )
+                # If cache is invalid, proceed to generate fresh schema
 
-        conn = sqlite3.connect(self.db_path, check_same_thread=False) # Ensure thread safety for Flask
+        conn = sqlite3.connect(
+            self.db_path, check_same_thread=False
+        )  # Ensure thread safety for Flask
         cursor = conn.cursor()
-        
+
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
         tables = cursor.fetchall()
         logging.info(f"Found {len(tables)} tables. Analyzing schema...")
@@ -249,23 +326,32 @@ class TextToSqlAgent:
         for table in tables:
             table_name = table[0]
             try:
-                cursor.execute(f"PRAGMA table_info(\"{table_name}\");") # Use quotes for safety
+                cursor.execute(
+                    f'PRAGMA table_info("{table_name}");'
+                )  # Use quotes for safety
                 columns = cursor.fetchall()
-                cursor.execute(f"SELECT * FROM \"{table_name}\" LIMIT 50;")
+                cursor.execute(f'SELECT * FROM "{table_name}" LIMIT 50;')
                 sample_data = cursor.fetchall()
                 column_indices = {col[1]: idx for idx, col in enumerate(columns)}
                 table_data.append((table_name, columns, sample_data, column_indices))
             except sqlite3.Error as e:
-                logging.error(f"Error fetching schema or data for table {table_name}: {e}", exc_info=True)
+                logging.error(
+                    f"Error fetching schema or data for table {table_name}: {e}",
+                    exc_info=True,
+                )
                 # Continue with other tables if one fails
 
         full_schema = ""
         schema_documents = []
         # Use ThreadPoolExecutor for parallel processing
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(5, len(table_data) if table_data else 1)) as executor:
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(5, len(table_data) if table_data else 1)
+        ) as executor:
             future_to_table = {
                 # Use the default LLM for schema analysis during startup
-                executor.submit(self._process_table, table_info, self.default_llm): table_info[0]
+                executor.submit(
+                    self._process_table, table_info, self.default_llm
+                ): table_info[0]
                 for table_info in table_data
             }
             for future in concurrent.futures.as_completed(future_to_table):
@@ -276,19 +362,24 @@ class TextToSqlAgent:
                     schema_documents.extend(table_docs)
                     logging.info(f"Completed processing table: {table_name}")
                 except Exception as e:
-                    logging.error(f"Error processing table {table_name} in thread: {e}", exc_info=True)
+                    logging.error(
+                        f"Error processing table {table_name} in thread: {e}",
+                        exc_info=True,
+                    )
 
         # Save to cache
         try:
             cache = {
-                'schema': full_schema,
-                'documents': [doc.text for doc in schema_documents]
+                "schema": full_schema,
+                "documents": [doc.text for doc in schema_documents],
             }
-            with open(self.cache_file, 'w') as f:
+            with open(self.cache_file, "w") as f:
                 json.dump(cache, f, indent=4)
             logging.info(f"Schema analysis complete and saved to {self.cache_file}.")
         except IOError as e:
-            logging.error(f"Error saving cache file {self.cache_file}: {e}", exc_info=True)
+            logging.error(
+                f"Error saving cache file {self.cache_file}: {e}", exc_info=True
+            )
 
         return full_schema, schema_documents, conn
 
@@ -337,7 +428,7 @@ OUTPUT: DIRECT_ANSWER: The database contains tables like: [List a few table name
 
 Now, analyze the current user question.
 
-OUTPUT:""" # Ensure the LLM starts its response right after this.
+OUTPUT:"""  # Ensure the LLM starts its response right after this.
 
         try:
             prompt = PromptTemplate(template=validation_prompt_str)
@@ -352,14 +443,21 @@ OUTPUT:""" # Ensure the LLM starts its response right after this.
                 return {"action": action, "details": details}
             else:
                 # Handle unexpected LLM response format
-                logging.warning(f"Unexpected validation response format: {response}. Defaulting to SQL_NEEDED.")
+                logging.warning(
+                    f"Unexpected validation response format: {response}. Defaulting to SQL_NEEDED."
+                )
                 # Fallback: Assume SQL is needed if unsure, or maybe ask for clarification.
                 # Let's default to SQL_NEEDED as it was the original behavior.
                 return {"action": "SQL_NEEDED", "details": ""}
         except Exception as e:
-            logging.error(f"Error during question validation LLM call: {e}", exc_info=True)
+            logging.error(
+                f"Error during question validation LLM call: {e}", exc_info=True
+            )
             # Fallback in case of API error
-            return {"action": "SQL_NEEDED", "details": ""} # Default to SQL needed on error
+            return {
+                "action": "SQL_NEEDED",
+                "details": "",
+            }  # Default to SQL needed on error
 
     def _generate_sql_query(self, user_question: str, llm) -> Tuple[Optional[str], str]:
         """Generates SQL query using context from LlamaIndex and schema information."""
@@ -368,8 +466,10 @@ OUTPUT:""" # Ensure the LLM starts its response right after this.
             retrieved_context = str(self.query_engine.query(user_question))
             logging.debug(f"Retrieved context for SQL generation: {retrieved_context}")
         except Exception as e:
-             logging.error(f"Error retrieving context from query engine: {e}", exc_info=True)
-             retrieved_context = "Context retrieval failed." # Provide fallback context
+            logging.error(
+                f"Error retrieving context from query engine: {e}", exc_info=True
+            )
+            retrieved_context = "Context retrieval failed."  # Provide fallback context
 
         history_context = self.conversation_history.get_formatted_history()
 
@@ -406,37 +506,46 @@ LIMIT 3;
 """
 
         user_msg = f"USER INPUT: {user_question}"
-        prompt_str = developer_msg + "\n" + user_msg + "\nGENERATED SQL:" # Guide the LLM output
+        prompt_str = (
+            developer_msg + "\n" + user_msg + "\nGENERATED SQL:"
+        )  # Guide the LLM output
 
         try:
             prompt = PromptTemplate(template=prompt_str)
-            logging.info(f"Attempting SQL generation using LLM type: {type(llm)}") # DEBUG LOG
+            logging.info(
+                f"Attempting SQL generation using LLM type: {type(llm)}"
+            )  # DEBUG LOG
             response = llm.predict(prompt).strip()
-            logging.info(f"Completed SQL generation using LLM type: {type(llm)}") # DEBUG LOG
+            logging.info(
+                f"Completed SQL generation using LLM type: {type(llm)}"
+            )  # DEBUG LOG
             logging.debug(f"SQL Generation LLM response: {response}")
 
             # Basic validation/cleanup of the generated SQL
             final_sql = response
             # Remove potential markdown backticks
             if final_sql.startswith("```sql"):
-                final_sql = final_sql[len("```sql"):].strip()
+                final_sql = final_sql[len("```sql") :].strip()
             if final_sql.endswith("```"):
-                final_sql = final_sql[:-len("```")].strip()
+                final_sql = final_sql[: -len("```")].strip()
             # Remove potential leading/trailing semicolons if they cause issues, though usually fine for execute()
-            final_sql = final_sql.strip().rstrip(';')
+            final_sql = final_sql.strip().rstrip(";")
 
             logging.info(f"Generated SQL: {final_sql}")
-            return final_sql, response # Return both raw and cleaned
+            return final_sql, response  # Return both raw and cleaned
         except Exception as e:
-            logging.error(f"Error during SQL generation LLM call with {type(llm)}: {e}", exc_info=True) # DEBUG LOG
+            logging.error(
+                f"Error during SQL generation LLM call with {type(llm)}: {e}",
+                exc_info=True,
+            )  # DEBUG LOG
             return None, f"Error generating SQL: {e}"
 
     def _execute_sql_query(self, sql_query: str) -> Union[List[Tuple], str]:
         """Executes the generated SQL query against the database."""
         logging.info(f"Executing SQL: {sql_query}")
         if not self.cursor:
-             logging.error("Database cursor is not initialized.")
-             return "Error: Database connection is not available."
+            logging.error("Database cursor is not initialized.")
+            return "Error: Database connection is not available."
         try:
             self.cursor.execute(sql_query)
             results = self.cursor.fetchall()
@@ -449,25 +558,40 @@ LIMIT 3;
         except sqlite3.Error as e:
             logging.error(f"Error executing SQL query: {e}", exc_info=True)
             return f"Error executing query: {e}"
-        except Exception as e: # Catch other potential errors
-            logging.error(f"An unexpected error occurred during query execution: {e}", exc_info=True)
+        except Exception as e:  # Catch other potential errors
+            logging.error(
+                f"An unexpected error occurred during query execution: {e}",
+                exc_info=True,
+            )
             return f"An unexpected error occurred: {e}"
 
-    def _generate_analysis(self, user_question: str, sql_query: str, query_results: Union[List[Tuple], str], llm) -> str:
+    def _generate_analysis(
+        self,
+        user_question: str,
+        sql_query: str,
+        query_results: Union[List[Tuple], str],
+        llm,
+    ) -> str:
         """Generates a natural language analysis of the query results."""
         logging.info("Generating analysis for query results.")
         history_context = self.conversation_history.get_formatted_history()
 
         # Format results nicely for the prompt
-        if isinstance(query_results, str): # Error message
+        if isinstance(query_results, str):  # Error message
             formatted_results = query_results
         elif not query_results:
-             formatted_results = "The query returned no results."
+            formatted_results = "The query returned no results."
         else:
             # Convert results to a more readable string format, maybe limit rows
-            headers = [desc[0] for desc in self.cursor.description] if self.cursor.description else []
+            headers = (
+                [desc[0] for desc in self.cursor.description]
+                if self.cursor.description
+                else []
+            )
             results_str = "Headers: " + ", ".join(headers) + "\n"
-            results_str += "\n".join([str(row) for row in query_results[:20]]) # Limit rows in prompt
+            results_str += "\n".join(
+                [str(row) for row in query_results[:20]]
+            )  # Limit rows in prompt
             if len(query_results) > 20:
                 results_str += f"\n... (truncated, {len(query_results)} total rows)"
             formatted_results = results_str
@@ -512,17 +636,25 @@ Now, generate the analysis for the user:
             logging.debug(f"Generated Analysis: {analysis}")
             return analysis
         except Exception as e:
-            logging.error(f"Error during analysis generation LLM call: {e}", exc_info=True)
+            logging.error(
+                f"Error during analysis generation LLM call: {e}", exc_info=True
+            )
             return f"Error generating analysis: {e}"
 
-    def process_query(self, user_question: str, model_name: str) -> Dict[str, Optional[str]]:
+    def process_query(
+        self, user_question: str, model_name: str
+    ) -> Dict[str, Optional[str]]:
         """
         Processes the user's question: validates, potentially clarifies,
         generates/executes SQL, and returns analysis or response. Requires agent to be initialized.
         """
         if not self.is_initialized or not self.query_engine or not self.conn:
             logging.error("Agent not initialized. Cannot process query.")
-            return {"type": "error", "message": "Agent is not ready. Please ensure data is loaded and indexed.", "sql_query": None}
+            return {
+                "type": "error",
+                "message": "Agent is not ready. Please ensure data is loaded and indexed.",
+                "sql_query": None,
+            }
 
         logging.info(f"Processing user query: '{user_question}'")
 
@@ -530,10 +662,14 @@ Now, generate the analysis for the user:
         try:
             llm = self._get_llm(model_name)
             if not llm:
-                 raise ValueError(f"Could not initialize LLM for model: {model_name}")
+                raise ValueError(f"Could not initialize LLM for model: {model_name}")
         except Exception as e:
-             logging.error(f"Failed to get LLM instance: {e}", exc_info=True)
-             return {"type": "error", "message": f"Error initializing language model: {e}", "sql_query": None}
+            logging.error(f"Failed to get LLM instance: {e}", exc_info=True)
+            return {
+                "type": "error",
+                "message": f"Error initializing language model: {e}",
+                "sql_query": None,
+            }
 
         validation_result = self._validate_question(user_question, llm)
         action = validation_result["action"]
@@ -545,9 +681,7 @@ Now, generate the analysis for the user:
             logging.info("Action: DIRECT_ANSWER")
             response["message"] = details
             self.conversation_history.add_interaction(
-                question=user_question,
-                response_type="direct_answer",
-                analysis=details
+                question=user_question, response_type="direct_answer", analysis=details
             )
 
         elif action == "CLARIFICATION_NEEDED":
@@ -555,45 +689,57 @@ Now, generate the analysis for the user:
             response["message"] = details
             # Don't add to history until clarification is resolved, or add with a specific type
             self.conversation_history.add_interaction(
-                 question=user_question,
-                 response_type="clarification_needed",
-                 analysis=details # Store the clarification question asked
+                question=user_question,
+                response_type="clarification_needed",
+                analysis=details,  # Store the clarification question asked
             )
 
         elif action == "SQL_NEEDED":
             logging.info("Action: SQL_NEEDED")
-            sql_query, raw_llm_sql_response = self._generate_sql_query(user_question, llm)
-            response["sql_query"] = sql_query # Include the generated SQL in the response
+            sql_query, raw_llm_sql_response = self._generate_sql_query(
+                user_question, llm
+            )
+            response[
+                "sql_query"
+            ] = sql_query  # Include the generated SQL in the response
 
             if sql_query:
                 query_results = self._execute_sql_query(sql_query)
-                analysis = self._generate_analysis(user_question, sql_query, query_results, llm)
+                analysis = self._generate_analysis(
+                    user_question, sql_query, query_results, llm
+                )
                 response["message"] = analysis
                 self.conversation_history.add_interaction(
                     question=user_question,
                     response_type="sql_analysis",
                     sql_query=sql_query,
-                    results=str(query_results) if not isinstance(query_results, str) else query_results, # Store results as string
-                    analysis=analysis
+                    results=str(query_results)
+                    if not isinstance(query_results, str)
+                    else query_results,  # Store results as string
+                    analysis=analysis,
                 )
             else:
                 logging.error("SQL generation failed.")
-                response["message"] = "I encountered an error trying to generate the SQL query needed to answer your question."
+                response[
+                    "message"
+                ] = "I encountered an error trying to generate the SQL query needed to answer your question."
                 # Add error interaction to history
                 self.conversation_history.add_interaction(
                     question=user_question,
                     response_type="error",
-                    analysis=response["message"]
-                 )
+                    analysis=response["message"],
+                )
 
-        else: # Should not happen based on _validate_question logic
+        else:  # Should not happen based on _validate_question logic
             logging.error(f"Invalid action '{action}' received from validation.")
             response["type"] = "error"
-            response["message"] = "An unexpected internal error occurred during question validation."
+            response[
+                "message"
+            ] = "An unexpected internal error occurred during question validation."
             self.conversation_history.add_interaction(
                 question=user_question,
                 response_type="error",
-                analysis=response["message"]
+                analysis=response["message"],
             )
 
         logging.info(f"Finished processing query. Response type: {response['type']}")
@@ -612,15 +758,20 @@ Now, generate the analysis for the user:
                 llm_instance = OpenAI(
                     model=model_name,
                     temperature=0.01,
-                    max_new_tokens=500, # Consider adjusting based on model
-                    request_timeout=60
+                    max_new_tokens=500,  # Consider adjusting based on model
+                    request_timeout=60,
                 )
             # Handle both standard (models/gemini-...) and experimental Gemini names
-            elif model_name.startswith("models/gemini-") or model_name == "gemini-2.5-pro-exp-03-25":
+            elif (
+                model_name.startswith("models/gemini-")
+                or model_name == "gemini-2.5-pro-exp-03-25"
+            ):
                 # When using Service Account authentication (ADC), the library primarily uses GOOGLE_APPLICATION_CREDENTIALS.
                 # We just need to ensure that variable is likely set (it's set in dockershell.sh).
                 if not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
-                    logging.error("GOOGLE_APPLICATION_CREDENTIALS environment variable not set. Cannot initialize Gemini via ADC.")
+                    logging.error(
+                        "GOOGLE_APPLICATION_CREDENTIALS environment variable not set. Cannot initialize Gemini via ADC."
+                    )
                     return None
 
                 # Construct the correct model name if it doesn't start with models/
@@ -631,13 +782,17 @@ Now, generate the analysis for the user:
                 # conditionally based on the specific experimental model string.
                 gemini_model_id = model_name
                 # The library requires the 'models/' prefix even for experimental names
-                if not gemini_model_id.startswith("models/") and not gemini_model_id.startswith("tunedModels/"):
-                     gemini_model_id = f"models/{gemini_model_id}"
-                     logging.info(f"Prepended 'models/' prefix. Using: {gemini_model_id}")
+                if not gemini_model_id.startswith(
+                    "models/"
+                ) and not gemini_model_id.startswith("tunedModels/"):
+                    gemini_model_id = f"models/{gemini_model_id}"
+                    logging.info(
+                        f"Prepended 'models/' prefix. Using: {gemini_model_id}"
+                    )
 
                 llm_instance = Gemini(
                     model_name=gemini_model_id,
-                    temperature=0.01, # Note: Gemini might use different temp scale/defaults
+                    temperature=0.01,  # Note: Gemini might use different temp scale/defaults
                     # Add other relevant Gemini parameters if needed
                 )
             else:
@@ -650,17 +805,19 @@ Now, generate the analysis for the user:
 
         except Exception as e:
             logging.error(f"Error initializing LLM {model_name}: {e}", exc_info=True)
-            return None # Failed to initialize
+            return None  # Failed to initialize
 
     def _print_vector_store_samples(self, num_samples=3):
         """Prints sample documents from the vector store."""
         if not self.index or not self.index.docstore:
-            logging.warning("Vector store not initialized or empty. Cannot print samples.")
+            logging.warning(
+                "Vector store not initialized or empty. Cannot print samples."
+            )
             return
 
-        logging.debug("\n" + "="*80)
+        logging.debug("\n" + "=" * 80)
         logging.debug("VECTOR STORE SAMPLES:")
-        logging.debug("="*80)
+        logging.debug("=" * 80)
         try:
             documents = list(self.index.docstore.docs.values())
             if not documents:
@@ -669,11 +826,11 @@ Now, generate the analysis for the user:
 
             for i, doc in enumerate(documents[:num_samples]):
                 logging.debug(f"\nSample Document {i+1}:")
-                logging.debug("-"*40)
+                logging.debug("-" * 40)
                 logging.debug(doc.text)
-                logging.debug("-"*40)
+                logging.debug("-" * 40)
 
-            logging.debug("\n" + "="*80 + "\n")
+            logging.debug("\n" + "=" * 80 + "\n")
         except Exception as e:
             logging.error(f"Error accessing vector store documents: {e}", exc_info=True)
 
@@ -693,6 +850,7 @@ Now, generate the analysis for the user:
         self.is_initialized = False
         # Keep conversation history? Optional. Let's keep it for now.
         logging.info("Agent resources released.")
+
 
 # Note: The main execution block (`if __name__ == "__main__":`)
 # has been removed as this script will now be imported and used by the server.
