@@ -66,7 +66,7 @@ graph LR
 
     subgraph Indexing
          J -- Load/Build Index --> E[Vector Index Store];
-         J -- Needs Embeddings --> K[Embedding Model]; # Implicitly via Agent/LlamaIndex
+         J -- Needs Embeddings --> K[Embedding Model];
          J -- Needs Schema Docs --> C; # Agent provides docs
          E -- Index Data --> J;
          J -- Query Engine --> C;
