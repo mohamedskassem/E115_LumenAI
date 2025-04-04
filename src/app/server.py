@@ -39,23 +39,9 @@ agent: Optional[TextToSqlAgent] = None
 
 # --- Helper Functions ---
 def cleanup_old_dirs():
-    """Attempts to delete cache/upload directories from previous runs at startup."""
-    logging.info("Checking for and cleaning up cache/upload directories from previous runs...")
-    
-    # Target the main directories for deletion at startup
-    for dir_to_delete in [VECTOR_STORE_CACHE_DIR, UPLOAD_FOLDER]:
-        if os.path.exists(dir_to_delete):
-            try:
-                # Add a small delay before attempting deletion
-                time.sleep(0.2)
-                shutil.rmtree(dir_to_delete)
-                logging.info(f"Successfully cleaned up directory: {dir_to_delete}")
-            except Exception as e:
-                # Log warning but don't stop startup if cleanup fails
-                logging.warning(f"Could not clean up directory {dir_to_delete} at startup: {e}")
-
-    # Always ensure UPLOAD_FOLDER exists after cleanup attempt
-    os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+    """Deprecated: This function's purpose is now handled by cleanup_cache_dirs."""
+    logging.warning("cleanup_old_dirs is deprecated and should not be called. Use cleanup_cache_dirs.")
+    pass # Keep the function defined to avoid potential import errors if referenced elsewhere unexpectedly
 
 def cleanup_cache_dirs():
     """Attempts to delete cache/upload directories from previous runs at startup."""
@@ -69,9 +55,15 @@ def cleanup_cache_dirs():
                 time.sleep(0.2)
                 shutil.rmtree(dir_to_delete)
                 logging.info(f"Successfully cleaned up directory: {dir_to_delete}")
+            except OSError as e:
+                 # Specifically catch OSError which includes EBUSY
+                 if e.errno == errno.EBUSY:
+                      logging.warning(f"Could not clean up directory {dir_to_delete} at startup due to EBUSY (Device or resource busy). Skipping.")
+                 else:
+                      logging.warning(f"Could not clean up directory {dir_to_delete} at startup due to OS error: {e}")
             except Exception as e:
-                # Log warning but don't stop startup if cleanup fails
-                logging.warning(f"Could not clean up directory {dir_to_delete} at startup: {e}")
+                # Log warning but don't stop startup if cleanup fails for other reasons
+                logging.warning(f"Could not clean up directory {dir_to_delete} at startup due to unexpected error: {e}")
 
     # Always ensure UPLOAD_FOLDER exists after cleanup attempt
     os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -113,6 +105,7 @@ def delete_existing_data_and_caches():
         
     deleted_files = []
     errors = []
+    ebusy_warnings = [] # Track EBUSY specifically
     
     # Delete DB
     if os.path.exists(DB_PATH):
@@ -134,26 +127,34 @@ def delete_existing_data_and_caches():
             logging.error(f"Error deleting schema cache {SCHEMA_CACHE_FILE}: {e}")
             errors.append(f"Schema cache deletion: {e}")
             
-    # --- ADDED: Delete Vector Store Cache ---
+    # --- Delete Vector Store Cache (Handle EBUSY gracefully) ---
     logging.info(f"Attempting to delete vector store cache: {VECTOR_STORE_CACHE_DIR}")
     if os.path.exists(VECTOR_STORE_CACHE_DIR):
         try:
             shutil.rmtree(VECTOR_STORE_CACHE_DIR)
             deleted_files.append(f"{VECTOR_STORE_CACHE_DIR} (directory)") # Indicate it's a directory
             logging.info("Vector store cache directory deleted.")
-            # Recreate the directory immediately as load_and_index might expect it
-            # Or let load_and_index handle creation if it doesn't exist
-            # Let's let load_and_index handle it.
+        except OSError as e:
+             if e.errno == errno.EBUSY:
+                  # Log as warning, don't treat as fatal error for this function's purpose
+                  warning_msg = f"Could not delete vector store cache {VECTOR_STORE_CACHE_DIR} due to EBUSY (Device or resource busy). It might require manual removal or stopping/restarting Docker completely."
+                  logging.warning(warning_msg)
+                  ebusy_warnings.append(warning_msg)
+                  # DO NOT add to errors list
+             else:
+                  # Treat other OS errors as errors
+                  err_msg = f"Error deleting vector store cache {VECTOR_STORE_CACHE_DIR} (OS Error): {e}"
+                  logging.error(err_msg)
+                  errors.append(err_msg)
         except Exception as e:
-            logging.error(f"Error deleting vector store cache {VECTOR_STORE_CACHE_DIR}: {e}")
-            errors.append(f"Vector store cache deletion error: {e}")
-    # -----------------------------------------
+            # Treat other unexpected errors as errors
+            err_msg = f"Error deleting vector store cache {VECTOR_STORE_CACHE_DIR} (Unexpected Error): {e}"
+            logging.error(err_msg)
+            errors.append(err_msg)
+    # -----------------------------------------------------------
             
-    # No longer need long initial sleep here, rename is faster
-    
-    # Directory deletion is now handled by cleanup_cache_dirs on startup
-            
-    return deleted_files, errors
+    # Return deleted files, fatal errors, and non-fatal EBUSY warnings
+    return deleted_files, errors, ebusy_warnings
 
 # Try to initialize agent on startup if DB exists
 # --- Perform initial cleanup and initialization ---
@@ -304,22 +305,32 @@ def upload_data():
         return jsonify({"error": "No selected files"}), 400
 
     # 1. Delete existing data and caches first (replace workflow)
-    delete_existing_data_and_caches()
+    # Ignore ebusy_warnings from this step for now, focus on fatal errors
+    _, delete_errors, _ = delete_existing_data_and_caches()
+    if delete_errors:
+         # If critical deletions failed (DB/Schema cache), maybe stop?
+         # For now, let's log and continue, but report later if init fails.
+         logging.error(f"Errors occurred during pre-upload cleanup: {delete_errors}. Proceeding with upload, but initialization might fail.")
+
     
     # 2. Save uploaded files temporarily
     saved_files = []
     for file in files:
         if file and file.filename.lower().endswith('.csv'):
             filepath = os.path.join(UPLOAD_FOLDER, file.filename)
-            file.save(filepath)
-            saved_files.append(filepath)
-            logging.info(f"Saved uploaded file: {filepath}")
+            try:
+                file.save(filepath)
+                saved_files.append(filepath)
+                logging.info(f"Saved uploaded file: {filepath}")
+            except Exception as e:
+                 logging.error(f"Error saving uploaded file {file.filename} to {filepath}: {e}")
+                 return jsonify({"error": f"Failed to save uploaded file {file.filename}"}), 500
         else:
             logging.warning(f"Skipping non-CSV file: {file.filename}")
             # Optionally return error if non-CSV is critical
 
     if not saved_files:
-        return jsonify({"error": "No valid CSV files were uploaded."}), 400
+        return jsonify({"error": "No valid CSV files were uploaded or saved."}), 400
 
     # 3. Convert CSVs to SQLite DB
     try:
@@ -377,19 +388,25 @@ def upload_data():
 def remove_data():
     """Removes the database and all associated caches.
     Shuts down the agent if running.
+    Handles EBUSY errors during vector cache deletion gracefully.
     ---
     tags:
       - Data Management
     responses:
       200:
-        description: Data and caches removed successfully.
+        description: Data and caches removed successfully (or cache removal skipped due to EBUSY).
         schema:
           id: RemoveSuccess
           properties:
             message:
               type: string
+            warnings: 
+              type: array
+              description: List of non-fatal warnings (e.g., EBUSY during cache cleanup).
+              items:
+                type: string
       500:
-        description: Errors occurred during cleanup (details may be in the message).
+        description: Critical errors occurred during cleanup (details may be in the message).
         schema:
           id: RemoveError
           properties:
@@ -410,13 +427,18 @@ def remove_data():
     else:
         logging.info("No active agent instance to shut down.")
         
-    # Now attempt deletion
-    deleted_files, errors = delete_existing_data_and_caches()
+    # Now attempt deletion, capturing errors and EBUSY warnings separately
+    deleted_files, errors, ebusy_warnings = delete_existing_data_and_caches()
     
     if errors:
-         return jsonify({"message": f"Attempted to remove data. Files deleted: {deleted_files}. Errors encountered: {errors}"}), 500
+         # If critical errors occurred (DB/schema cache deletion failed)
+         return jsonify({"message": f"Attempted to remove data. Files deleted: {deleted_files}. Critical errors encountered: {errors}", "errors": errors}), 500
     else:
-        return jsonify({"message": f"Successfully removed data and caches: {deleted_files}"}), 200
+        # If only EBUSY warnings occurred, or no errors/warnings
+        success_message = f"Successfully removed critical data (DB, schema cache): {deleted_files}."
+        if ebusy_warnings:
+             success_message += " Warning: Vector cache directory may still exist due to 'Device or resource busy' error and might require manual cleanup."
+        return jsonify({"message": success_message, "warnings": ebusy_warnings}), 200
 
 # --- Refresh Endpoint ---
 @app.route('/refresh-index', methods=['POST'])

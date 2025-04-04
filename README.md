@@ -38,10 +38,11 @@ The application follows a three-tier architecture:
     *   Returns JSON responses to the frontend.
 
 3.  **Agent Logic (`TextToSqlAgent` & Modules):**
-    *   **`app.py` (`TextToSqlAgent`):** Orchestrates the query process, manages conversation history, handles LLM instance caching (`_get_llm`), manages vector store index loading/building, and coordinates interactions between other modules.
+    *   **`app.py` (`TextToSqlAgent`):** Orchestrates the query process, manages conversation history, handles LLM instance caching (`_get_llm`), and coordinates interactions between other modules.
     *   **`data_handler.py`:** Responsible for connecting to the database for schema analysis, performing the schema analysis (potentially using an LLM), caching the results, and providing persistent DB connections for query execution.
     *   **`llm_interface.py`:** Contains the specific prompt templates and functions for interacting with LLMs for core tasks: question validation, SQL generation, and results analysis.
-    *   The agent uses LlamaIndex (`VectorStoreIndex`, `OpenAIEmbedding`) for semantic context retrieval.
+    *   **`vector_store.py` (`VectorStoreManager`):** Manages the lifecycle of the LlamaIndex `VectorStoreIndex` - checking cache validity, loading from cache, building a new index, persisting, and providing the query engine.
+    *   The agent uses LlamaIndex (`VectorStoreIndex`, `OpenAIEmbedding`) for semantic context retrieval (via the `VectorStoreManager`).
     *   Interacts with LLMs (OpenAI `gpt-4-turbo` for schema analysis via `data_handler`, configured model like Gemini for query tasks via `llm_interface`).
 
 ```mermaid
@@ -52,7 +53,7 @@ graph LR
     subgraph Agent Core Logic
         C -- Needs Schema/Connection --> D[Data Handler - data_handler.py];
         C -- Needs LLM Task --> I[LLM Interface - llm_interface.py];
-        C -- Retrieve Context --> E[Vector Index];
+        C -- Needs Index/Query Engine --> J[Vector Store Mgr - vector_store.py];
         C -- Execute SQL --> F[SQLite DB];
     end
 
@@ -63,11 +64,20 @@ graph LR
         D -- Schema/Connection --> C;
     end
 
+    subgraph Indexing
+         J -- Load/Build Index --> E[Vector Index Store];
+         J -- Needs Embeddings --> K[Embedding Model]; # Implicitly via Agent/LlamaIndex
+         J -- Needs Schema Docs --> C; # Agent provides docs
+         E -- Index Data --> J;
+         J -- Query Engine --> C;
+    end
+
     subgraph Query Processing
         I -- LLM Call (Validate/SQL/Analyze) --> H[Configured Query LLM];
         H -- Response --> I;
         I -- Result --> C;
-        E -- Context --> C;
+        C -- Retrieve Context Query --> J; # Query sent to manager/engine
+        J -- Context --> C;
         F -- SQL Results --> C;
     end
 
@@ -94,6 +104,7 @@ graph LR
         ├── server.py             # Flask server & API endpoints
         ├── data_handler.py       # Database schema loading and analysis logic
         ├── llm_interface.py      # LLM prompt templates and task execution functions
+        ├── vector_store.py       # Vector store index management logic
         ├── schema_cache.json     # (Generated on first run)
         ├── secrets/
         │   ├── openai_api_key.txt # (User must create)

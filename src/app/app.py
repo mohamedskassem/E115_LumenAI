@@ -6,14 +6,10 @@ import concurrent.futures
 import time # Import time module
 from typing import List, Tuple, Dict, Optional, Union
 import logging
-from llama_index.core import (
-    VectorStoreIndex,
-    Document,
-    Settings,
-    PromptTemplate,
-    StorageContext,
-    load_index_from_storage,
-)
+from llama_index.core import Document # Still needed for type hints
+from llama_index.core import Settings # Still needed? Check usage
+from llama_index.core import PromptTemplate # Still needed? Check usage - Yes, for LLM interface
+from llama_index.core.base.base_query_engine import BaseQueryEngine # For type hint
 from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.llms.openai import OpenAI
 from llama_index.llms.gemini import Gemini
@@ -22,6 +18,7 @@ from llama_index.llms.gemini import Gemini
 import data_handler 
 # Import the new LLM interface module
 import llm_interface
+from vector_store import VectorStoreManager # Import the new manager
 
 # ------------------------------
 # Configure Logging
@@ -109,7 +106,7 @@ class TextToSqlAgent:
     ):
         logging.info("Initializing TextToSqlAgent object...")
         # Configuration details stored, but initialization deferred
-        self.persist_dir = "vector_store_cache"  # Directory to store the index
+        persist_dir = "vector_store_cache"  # Directory to store the index
         self.db_path = db_path
         self.cache_file = cache_file
         self.default_model = (
@@ -119,12 +116,14 @@ class TextToSqlAgent:
             str, Union[OpenAI, Gemini]
         ] = {}  # Cache for dynamically loaded LLMs
         self.embed_model = None  # Initialized in load_and_index
-        self.index = None  # Initialized in load_and_index
-        self.query_engine = None  # Initialized in load_and_index
+        # self.index = None  # Managed by VectorStoreManager
+        self.query_engine: Optional[BaseQueryEngine] = None  # Set by load_and_index
         self.conn = None  # Initialized in load_and_index
         self.cursor = None  # Initialized in load_and_index
         self.full_schema = ""  # Initialized in load_and_index
         self.conversation_history = ConversationHistory()
+        # Initialize the Vector Store Manager
+        self.vector_store_manager = VectorStoreManager(persist_dir=persist_dir)
         self.is_initialized = False  # Flag to track if indexing is complete
         # Defer actual initialization until load_and_index is called
 
@@ -148,6 +147,8 @@ class TextToSqlAgent:
             # Initialize Embeddings first
             logging.info("Initializing OpenAI Embeddings (text-embedding-3-small)...")
             self.embed_model = OpenAIEmbedding(model="text-embedding-3-small")
+            if not self.embed_model:
+                 raise ValueError("Embedding model initialization failed.")
         except Exception as e:
             logging.error(f"Error initializing Embeddings: {e}", exc_info=True)
             return False # Cannot proceed without embeddings
@@ -158,10 +159,8 @@ class TextToSqlAgent:
         schema_analysis_llm = None
         try:
             logging.info(f"Initializing {schema_analysis_model_name} specifically for schema analysis...")
-            # Restore default retries
             schema_analysis_llm = OpenAI(model=schema_analysis_model_name, temperature=0.01)
             if not os.environ.get("OPENAI_API_KEY"):
-                 # Check key exists, though OpenAI constructor might also raise error
                  raise ValueError("OpenAI API Key not found, needed for schema analysis.")
         except Exception as e:
             logging.error(f"Failed to initialize {schema_analysis_model_name} for schema analysis: {e}. Schema summaries might be basic.", exc_info=True)
@@ -170,18 +169,15 @@ class TextToSqlAgent:
         # --- Load Schema using Data Handler --- 
         logging.info("Loading DB schema and column summaries using data_handler...")
         try:
-            # Call the function from data_handler module
             self.full_schema, schema_docs = data_handler.load_db_schema_and_summaries(
                 self.db_path, self.cache_file, schema_analysis_llm
             )
             if not self.full_schema or not schema_docs:
-                 # Handle case where schema loading completely failed (e.g., DB error)
                  logging.error("Failed to load schema or generate documents from data_handler.")
                  return False
             logging.info("Database schema loaded/analyzed.")
             logging.debug(f"Full Schema Snippet:\n{self.full_schema[:500]}...")
         except Exception as e:
-             # Catch unexpected errors from the handler call itself
              logging.error(f"Error calling data_handler.load_db_schema_and_summaries: {e}", exc_info=True)
              return False
 
@@ -192,86 +188,32 @@ class TextToSqlAgent:
             self.conn, self.cursor = db_conn_info
         else:
             logging.error(f"Failed to establish persistent DB connection to {self.db_path}. Cannot execute queries.")
-            # Decide if agent should fail initialization here. Let's fail it.
             return False
 
-        # --- Initialize Vector Store Index --- 
-        logging.info("Initializing Vector Store Index...")
+        # --- Initialize Vector Store Index using Manager --- 
+        logging.info("Initializing Vector Store Index via VectorStoreManager...")
         try:
-            # --- Check for existing and VALID cache ---
-            should_load_from_cache = False
-            if os.path.exists(self.persist_dir):
-                # Check if essential files exist within the directory
-                docstore_path = os.path.join(self.persist_dir, 'docstore.json')
-                # You could add checks for other files like vector_store.json if needed
-                if os.path.exists(docstore_path):
-                    logging.info(f"Found existing cache directory and key file: {docstore_path}")
-                    should_load_from_cache = True
-                else:
-                    logging.warning(f"Cache directory '{self.persist_dir}' exists, but key file '{docstore_path}' is missing. Forcing rebuild.")
-            # -----------------------------------------
-
-            # if os.path.exists(self.persist_dir):
-            if should_load_from_cache:
-                if not self.embed_model: # Should not happen if we checked above
-                    logging.error("Embed model not initialized before loading index.")
-                    return False 
-                logging.info(f"Loading existing vector store index from: {self.persist_dir}")
-                storage_context = StorageContext.from_defaults(persist_dir=self.persist_dir)
-                self.index = load_index_from_storage(storage_context, embed_model=self.embed_model)
-                self.query_engine = self.index.as_query_engine(response_mode="no_text")
-                logging.info("Vector Store Index loaded successfully from cache.")
-            else:
-                if not os.path.exists(self.persist_dir):
-                     logging.info(f"No existing vector store cache directory found at {self.persist_dir}. Building new index...")
-                # Else: The warning about missing key file was already logged above
-                self._build_and_persist_index(schema_docs)
-                if not self.index or not self.query_engine:
-                     raise RuntimeError("Failed to build index after cache check.") # Ensure build worked
+             # The manager handles checking cache, loading, or building
+             _, self.query_engine = self.vector_store_manager.load_or_build_index(
+                 schema_docs=schema_docs, 
+                 embed_model=self.embed_model
+             )
+             # Check if the manager succeeded
+             if not self.query_engine:
+                  raise RuntimeError("VectorStoreManager failed to load or build index/query engine.")
+             logging.info("VectorStoreManager successfully provided query engine.")
 
         except Exception as e:
-             logging.error(f"Error initializing Vector Store Index: {e}", exc_info=True)
+             # Catch errors from the manager call or the RuntimeError above
+             logging.error(f"Error during vector store initialization via manager: {e}", exc_info=True)
              if self.conn:
                   self.conn.close() # Cleanup connection on index failure
              return False
+        # --- Vector Store Initialization Complete --- 
 
         self.is_initialized = True
         logging.info("Agent initialization and indexing complete.")
         return True
-
-    def _build_and_persist_index(self, schema_docs: List[Document]):
-        """Builds the vector index from documents and persists it."""
-        # Ensure embed_model is available
-        if not self.embed_model:
-             logging.error("Cannot build index: embed_model not initialized.")
-             return # Or raise error
-
-        try:
-            # Note: No need to temporarily set Settings.llm here if index building itself
-            # doesn't inherently require an LLM. The schema analysis (using a specific LLM)
-            # is already done.
-            
-            # Initialize LlamaIndex with documents
-            logging.info(f"Building index with {len(schema_docs)} schema documents...")
-            self.index = VectorStoreIndex.from_documents(
-                schema_docs, embed_model=self.embed_model
-            )
-            # Configure query engine to only retrieve context, not synthesize text
-            self.query_engine = self.index.as_query_engine(response_mode="no_text")
-
-            logging.info(f"Persisting index to: {self.persist_dir}")
-            # Ensure directory exists before persisting
-            os.makedirs(self.persist_dir, exist_ok=True)
-            self.index.storage_context.persist(persist_dir=self.persist_dir)
-
-            # self._print_vector_store_samples(num_samples=1) # Optional: for debugging
-            logging.info("Vector Store Index built and persisted successfully.")
-        except Exception as e:
-            logging.error(f"Error building/persisting Vector Store Index: {e}", exc_info=True)
-            # Reset index/engine state if build fails
-            self.index = None
-            self.query_engine = None
-            # Do not raise here, let the caller handle initialization failure
 
     def _validate_question(self, user_question: str, llm: llm_interface.LlmType) -> Dict[str, str]:
         """
@@ -292,6 +234,11 @@ class TextToSqlAgent:
     def _generate_sql_query(self, user_question: str, llm: llm_interface.LlmType) -> Tuple[Optional[str], str]:
         """Generates SQL query using context, schema, history via llm_interface."""
         logging.info(f"Generating SQL for question: '{user_question}'")
+        # Ensure query engine is available before attempting context retrieval
+        if not self.query_engine:
+             logging.error("Query engine not available for context retrieval.")
+             return None, "Error: Query engine not initialized."
+             
         try:
             # Retrieve context using the agent's query engine
             retrieved_context = str(self.query_engine.query(user_question))
@@ -320,10 +267,6 @@ class TextToSqlAgent:
         try:
             self.cursor.execute(sql_query)
             results = self.cursor.fetchall()
-            # Limit results for display/analysis if necessary
-            # if len(results) > 100:
-            #     logging.warning(f"Query returned {len(results)} rows. Truncating for analysis.")
-            #     # return results[:100] # Optionally truncate here or in analysis prompt
             logging.info(f"Query executed successfully, {len(results)} rows returned.")
             return results
         except sqlite3.Error as e:
@@ -357,8 +300,9 @@ class TextToSqlAgent:
         Processes the user's question: validates, potentially clarifies,
         generates/executes SQL, and returns analysis or response. Requires agent to be initialized.
         """
+        # Check for initialization, including the query engine which is set by the manager
         if not self.is_initialized or not self.query_engine or not self.conn:
-            logging.error("Agent not initialized. Cannot process query.")
+            logging.error("Agent not initialized (or query engine missing). Cannot process query.")
             return {
                 "type": "error",
                 "message": "Agent is not ready. Please ensure data is loaded and indexed.",
@@ -397,7 +341,6 @@ class TextToSqlAgent:
         elif action == "CLARIFICATION_NEEDED":
             logging.info("Action: CLARIFICATION_NEEDED")
             response["message"] = details
-            # Don't add to history until clarification is resolved, or add with a specific type
             self.conversation_history.add_interaction(
                 question=user_question,
                 response_type="clarification_needed",
@@ -406,17 +349,13 @@ class TextToSqlAgent:
 
         elif action == "SQL_NEEDED":
             logging.info("Action: SQL_NEEDED")
-            # Call agent method that now uses llm_interface
             sql_query, raw_llm_sql_response = self._generate_sql_query(
                 user_question, llm
             )
-            response[
-                "sql_query"
-            ] = sql_query  # Include the generated SQL in the response
+            response["sql_query"] = sql_query
 
             if sql_query:
                 query_results = self._execute_sql_query(sql_query)
-                 # Call agent method that now uses llm_interface
                 analysis = self._generate_analysis(
                     user_question, sql_query, query_results, llm
                 )
@@ -427,15 +366,13 @@ class TextToSqlAgent:
                     sql_query=sql_query,
                     results=str(query_results)
                     if not isinstance(query_results, str)
-                    else query_results,  # Store results as string
+                    else query_results,
                     analysis=analysis,
                 )
             else:
                 logging.error("SQL generation failed.")
-                # Use the error message from generate_sql if available
                 error_msg = raw_llm_sql_response if raw_llm_sql_response else "I encountered an error trying to generate the SQL query needed to answer your question."
                 response["message"] = error_msg
-                # Add error interaction to history
                 self.conversation_history.add_interaction(
                     question=user_question,
                     response_type="error",
@@ -445,9 +382,7 @@ class TextToSqlAgent:
         else:  # Should not happen based on validation logic
             logging.error(f"Invalid action '{action}' received from validation.")
             response["type"] = "error"
-            response[
-                "message"
-            ] = "An unexpected internal error occurred during question validation."
+            response["message"] = "An unexpected internal error occurred during question validation."
             self.conversation_history.add_interaction(
                 question=user_question,
                 response_type="error",
@@ -473,27 +408,16 @@ class TextToSqlAgent:
                     max_new_tokens=500,  # Consider adjusting based on model
                     request_timeout=60,
                 )
-            # Handle both standard (models/gemini-...) and experimental Gemini names
             elif (
                 model_name.startswith("models/gemini-")
                 or model_name == "gemini-2.5-pro-exp-03-25"
             ):
-                # When using Service Account authentication (ADC), the library primarily uses GOOGLE_APPLICATION_CREDENTIALS.
-                # We just need to ensure that variable is likely set (it's set in dockershell.sh).
                 if not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
                     logging.error(
                         "GOOGLE_APPLICATION_CREDENTIALS environment variable not set. Cannot initialize Gemini via ADC."
                     )
                     return None
-
-                # Construct the correct model name if it doesn't start with models/
-                # The library requires the 'models/' prefix even for experimental names
-                # For experimental ones, it might accept the short name directly.
-                # Let's pass the provided name directly for now.
-                # If this causes issues, we might need to prepend "models/"
-                # conditionally based on the specific experimental model string.
                 gemini_model_id = model_name
-                # The library requires the 'models/' prefix even for experimental names
                 if not gemini_model_id.startswith(
                     "models/"
                 ) and not gemini_model_id.startswith("tunedModels/"):
@@ -501,11 +425,9 @@ class TextToSqlAgent:
                     logging.info(
                         f"Prepended 'models/' prefix. Using: {gemini_model_id}"
                     )
-
                 llm_instance = Gemini(
                     model_name=gemini_model_id,
-                    temperature=0.01,  # Note: Gemini might use different temp scale/defaults
-                    # Add other relevant Gemini parameters if needed
+                    temperature=0.01,
                 )
             else:
                 logging.error(f"Unsupported model name provided: {model_name}")
@@ -521,9 +443,27 @@ class TextToSqlAgent:
             
     def _print_vector_store_samples(self, num_samples=3):
         """Prints sample documents from the vector store."""
-        if not self.index or not self.index.docstore:
+        # This might need adjustment if self.index is no longer directly accessible
+        # or if manager should provide this functionality.
+        # For now, let's assume self.index might be None if manager failed, 
+        # or we need to get the index from the manager if we didn't store it.
+        # Let's try getting it from the manager if we didn't store self.index
+        # Assuming self.query_engine exists implies self.index exists inside manager or was loaded.
+        # Let's refine this: We should probably store self.index from the manager's return value.
+        # EDIT: Ok, I'll add storing self.index back.
+        
+        # We need self.index to access docstore. Let's get it from query_engine.
+        if not self.query_engine or not hasattr(self.query_engine, 'retriever') or not hasattr(self.query_engine.retriever, '_index'):
+             # This access pattern might change with LlamaIndex versions
+             # A safer approach might be storing self.index alongside self.query_engine
+             logging.warning("Cannot access index/docstore via query engine for printing samples.")
+             return
+             
+        index = self.query_engine.retriever._index # Accessing internal attribute, potentially fragile
+
+        if not index or not index.docstore:
             logging.warning(
-                "Vector store not initialized or empty. Cannot print samples."
+                "Vector store index/docstore not initialized or empty. Cannot print samples."
             )
             return
 
@@ -531,7 +471,7 @@ class TextToSqlAgent:
         logging.debug("VECTOR STORE SAMPLES:")
         logging.debug("=" * 80)
         try:
-            documents = list(self.index.docstore.docs.values())
+            documents = list(index.docstore.docs.values())
             if not documents:
                 logging.debug("No documents found in the vector store.")
                 return
@@ -553,13 +493,13 @@ class TextToSqlAgent:
             self.conn.close()
             self.conn = None
         self.cursor = None
-        self.index = None
+        # self.index = None # Now managed by vector_store_manager
         self.query_engine = None
         self.initialized_llms = {}
         self.embed_model = None
         self.full_schema = ""
+        # self.vector_store_manager = None # Reset manager? Maybe not necessary if stateless
         self.is_initialized = False
-        # Keep conversation history? Optional. Let's keep it for now.
         logging.info("Agent resources released.")
 
 
