@@ -37,31 +37,40 @@ The application follows a three-tier architecture:
     *   Manages the lifecycle of the `TextToSqlAgent`.
     *   Returns JSON responses to the frontend.
 
-3.  **Agent Logic (`TextToSqlAgent`):**
-    *   Contained within `app.py`.
-    *   Manages conversation history.
-    *   Performs initial question validation (SQL needed, direct answer, clarification) using the query-time LLM.
-    *   Handles schema loading, analysis (using `gpt-4-turbo`), and caching.
-    *   Uses LlamaIndex (`VectorStoreIndex`, `OpenAIEmbedding`) for semantic context retrieval.
-    *   Interacts with LLMs (OpenAI `gpt-4-turbo` for schema, configured model like Gemini for queries) via LlamaIndex.
-    *   Connects to the SQLite database (e.g., `output/user_data.db`) to execute generated queries.
+3.  **Agent Logic (`TextToSqlAgent` & Modules):**
+    *   **`app.py` (`TextToSqlAgent`):** Orchestrates the query process, manages conversation history, handles LLM instance caching (`_get_llm`), manages vector store index loading/building, and coordinates interactions between other modules.
+    *   **`data_handler.py`:** Responsible for connecting to the database for schema analysis, performing the schema analysis (potentially using an LLM), caching the results, and providing persistent DB connections for query execution.
+    *   **`llm_interface.py`:** Contains the specific prompt templates and functions for interacting with LLMs for core tasks: question validation, SQL generation, and results analysis.
+    *   The agent uses LlamaIndex (`VectorStoreIndex`, `OpenAIEmbedding`) for semantic context retrieval.
+    *   Interacts with LLMs (OpenAI `gpt-4-turbo` for schema analysis via `data_handler`, configured model like Gemini for query tasks via `llm_interface`).
 
 ```mermaid
 graph LR
     A[Browser UI] -- HTTP Requests --> B(Flask API / Flasgger - server.py);
     B -- process_query() / manage agent --> C{TextToSqlAgent - app.py};
-    subgraph Agent Initialization / Refresh
-        C -- Load Schema / Analyze --> G[OpenAI GPT-4 Turbo];
+    
+    subgraph Agent Core Logic
+        C -- Needs Schema/Connection --> D[Data Handler - data_handler.py];
+        C -- Needs LLM Task --> I[LLM Interface - llm_interface.py];
+        C -- Retrieve Context --> E[Vector Index];
+        C -- Execute SQL --> F[SQLite DB];
     end
+
+    subgraph Initialization / Schema
+        D -- Connect / Analyze Schema --> F;
+        D -- Optional LLM Call --> G[OpenAI GPT-4 Turbo];
+        G -- Analysis --> D;
+        D -- Schema/Connection --> C;
+    end
+
     subgraph Query Processing
-         C -- "LLM Call - Validate-SQL-Analyze" --> H[Configured Query LLM];
-         C -- Retrieve Context --> E[Vector Index];
-         C -- Execute SQL --> F[SQLite DB];
+        I -- LLM Call (Validate/SQL/Analyze) --> H[Configured Query LLM];
+        H -- Response --> I;
+        I -- Result --> C;
+        E -- Context --> C;
+        F -- SQL Results --> C;
     end
-    F -- Results --> C;
-    G -- Analysis --> C;
-    H -- Response --> C;
-    E -- Context --> C;
+
     C -- Agent Response --> B;
     B -- HTTP Response (JSON / HTML) --> A;
     B -- Serves /apidocs --> A;
@@ -81,8 +90,10 @@ graph LR
         ├── Pipfile.lock
         ├── .dockerignore
         ├── dockershell.sh        # Build & Run script
-        ├── app.py                # Core TextToSqlAgent logic
+        ├── app.py                # Core TextToSqlAgent logic (Orchestration)
         ├── server.py             # Flask server & API endpoints
+        ├── data_handler.py       # Database schema loading and analysis logic
+        ├── llm_interface.py      # LLM prompt templates and task execution functions
         ├── schema_cache.json     # (Generated on first run)
         ├── secrets/
         │   ├── openai_api_key.txt # (User must create)
