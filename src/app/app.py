@@ -3,6 +3,7 @@ import sqlite3
 import json
 import shutil  # For deleting directories
 import concurrent.futures
+import time # Import time module
 from typing import List, Tuple, Dict, Optional, Union
 import logging
 from llama_index.core import (
@@ -324,14 +325,15 @@ class TextToSqlAgent:
                 # If cache is invalid, proceed to generate fresh schema
 
         # --- Initialize dedicated LLM for schema analysis ---
-        schema_analysis_model_name = "gpt-4-turbo" # Specify the model here
+        schema_analysis_model_name = "gpt-4-turbo" # Restored gpt-4-turbo
         schema_analysis_llm = None
         try:
             # Temporarily use OpenAI for schema analysis
             logging.info(f"Initializing {schema_analysis_model_name} specifically for schema analysis...")
             schema_analysis_llm = OpenAI(
                  model=schema_analysis_model_name,
-                 temperature=0.01, 
+                 temperature=0.01,
+                 # REMOVED max_retries=0, allowing default retries
                  # Add other necessary OpenAI parameters if needed (e.g., max_tokens)
             )
             if not os.environ.get("OPENAI_API_KEY"):
@@ -375,8 +377,8 @@ class TextToSqlAgent:
         # Use ThreadPoolExecutor for parallel processing
         # --- Using the dedicated schema_analysis_llm --- 
         with concurrent.futures.ThreadPoolExecutor(
-             # Reduced parallelism to potentially avoid rate limits even on GPT-4
-             max_workers=2 # Adjusted max_workers
+             # Restore parallelism
+             max_workers=2 # Restored max_workers to 2
         ) as executor:
             future_to_table = {
                 executor.submit(
