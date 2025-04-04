@@ -67,7 +67,7 @@ graph LR
     subgraph Indexing
          J -- Load/Build Index --> E[Vector Index Store];
          J -- Needs Embeddings --> K[Embedding Model];
-         J -- Needs Schema Docs --> C; # Agent provides docs
+         J -- Needs Schema Docs --> C;
          E -- Index Data --> J;
          J -- Query Engine --> C;
     end
@@ -76,7 +76,7 @@ graph LR
         I -- LLM Call (Validate/SQL/Analyze) --> H[Configured Query LLM];
         H -- Response --> I;
         I -- Result --> C;
-        C -- Retrieve Context Query --> J; # Query sent to manager/engine
+        C -- Retrieve Context Query --> J;
         J -- Context --> C;
         F -- SQL Results --> C;
     end
