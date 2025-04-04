@@ -134,6 +134,21 @@ def delete_existing_data_and_caches():
             logging.error(f"Error deleting schema cache {SCHEMA_CACHE_FILE}: {e}")
             errors.append(f"Schema cache deletion: {e}")
             
+    # --- ADDED: Delete Vector Store Cache ---
+    logging.info(f"Attempting to delete vector store cache: {VECTOR_STORE_CACHE_DIR}")
+    if os.path.exists(VECTOR_STORE_CACHE_DIR):
+        try:
+            shutil.rmtree(VECTOR_STORE_CACHE_DIR)
+            deleted_files.append(f"{VECTOR_STORE_CACHE_DIR} (directory)") # Indicate it's a directory
+            logging.info("Vector store cache directory deleted.")
+            # Recreate the directory immediately as load_and_index might expect it
+            # Or let load_and_index handle creation if it doesn't exist
+            # Let's let load_and_index handle it.
+        except Exception as e:
+            logging.error(f"Error deleting vector store cache {VECTOR_STORE_CACHE_DIR}: {e}")
+            errors.append(f"Vector store cache deletion error: {e}")
+    # -----------------------------------------
+            
     # No longer need long initial sleep here, rename is faster
     
     # Directory deletion is now handled by cleanup_cache_dirs on startup
