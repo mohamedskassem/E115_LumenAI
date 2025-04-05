@@ -101,14 +101,12 @@ class TextToSqlAgent:
     def __init__(
         self,
         db_path: str,
-        cache_file: str = "schema_cache.json",
         default_model: str = "gpt-4-turbo",
     ):
         logging.info("Initializing TextToSqlAgent object...")
         # Configuration details stored, but initialization deferred
         persist_dir = "vector_store_cache"  # Directory to store the index
         self.db_path = db_path
-        self.cache_file = cache_file
         self.default_model = (
             default_model  # Model for schema analysis and default queries
         )
@@ -121,16 +119,21 @@ class TextToSqlAgent:
         self.conn = None  # Initialized in load_and_index
         self.cursor = None  # Initialized in load_and_index
         self.full_schema = ""  # Initialized in load_and_index
+        self.detailed_schema_analysis: Optional[Dict] = None # NEW: Store detailed analysis
         self.conversation_history = ConversationHistory()
         # Initialize the Vector Store Manager
         self.vector_store_manager = VectorStoreManager(persist_dir=persist_dir)
         self.is_initialized = False  # Flag to track if indexing is complete
         # Defer actual initialization until load_and_index is called
 
-    def load_and_index(self):
-        """Loads data, initializes components, builds/loads index. Called after DB exists."""
-        if self.is_initialized:
-            logging.info("Agent already initialized.")
+    def load_and_index(self, force_regenerate_analysis: bool = False):
+        """Loads data, initializes components, builds/loads index, loads/generates schema analysis.
+        
+        Args:
+            force_regenerate_analysis: If True, force regeneration of schema analysis cache.
+        """
+        if self.is_initialized and not force_regenerate_analysis:
+            logging.info("Agent already initialized and not forcing regeneration.")
             return True
 
         if not os.path.exists(self.db_path):
@@ -139,76 +142,90 @@ class TextToSqlAgent:
             )
             return False
 
-        logging.info(f"Starting initialization and indexing for DB: {self.db_path}")
+        logging.info(f"Starting initialization and indexing for DB: {self.db_path} (Force Analysis Regen: {force_regenerate_analysis})")
         
         # --- Initialize Embeddings --- 
-        logging.info("Initializing Embeddings...")
-        try:
-            # Initialize Embeddings first
-            logging.info("Initializing OpenAI Embeddings (text-embedding-3-small)...")
-            self.embed_model = OpenAIEmbedding(model="text-embedding-3-small")
-            if not self.embed_model:
-                 raise ValueError("Embedding model initialization failed.")
-        except Exception as e:
-            logging.error(f"Error initializing Embeddings: {e}", exc_info=True)
-            return False # Cannot proceed without embeddings
+        if not self.embed_model:
+            logging.info("Initializing Embeddings...")
+            try:
+                logging.info("Initializing OpenAI Embeddings (text-embedding-3-small)...")
+                self.embed_model = OpenAIEmbedding(model="text-embedding-3-small")
+                if not self.embed_model:
+                    raise ValueError("Embedding model initialization failed.")
+            except Exception as e:
+                logging.error(f"Error initializing Embeddings: {e}", exc_info=True)
+                return False # Cannot proceed without embeddings
 
         # --- Initialize dedicated LLM for Schema Analysis --- 
-        # (Moved initialization here to pass to data_handler)
-        schema_analysis_model_name = "gpt-4-turbo" # Or use 3.5-turbo if preferred
+        schema_analysis_model_name = "gpt-4-turbo" 
         schema_analysis_llm = None
         try:
             logging.info(f"Initializing {schema_analysis_model_name} specifically for schema analysis...")
-            schema_analysis_llm = OpenAI(model=schema_analysis_model_name, temperature=0.01)
-            if not os.environ.get("OPENAI_API_KEY"):
-                 raise ValueError("OpenAI API Key not found, needed for schema analysis.")
+            # Use self._get_llm to leverage caching if the same model is requested later
+            # Note: This assumes _get_llm can handle OpenAI models
+            schema_analysis_llm = self._get_llm(schema_analysis_model_name)
+            # Add specific check for OpenAI API key if needed for this model
+            if isinstance(schema_analysis_llm, OpenAI) and not os.environ.get("OPENAI_API_KEY"):
+                logging.warning("OpenAI API Key not found, needed for schema analysis. Analysis will be basic.")
+                schema_analysis_llm = None # Nullify if key missing
         except Exception as e:
             logging.error(f"Failed to initialize {schema_analysis_model_name} for schema analysis: {e}. Schema summaries might be basic.", exc_info=True)
-            # Proceed even if LLM fails, data_handler generates basic summaries
+            # Proceed even if LLM fails, data_handler generates basic summaries/cache
 
-        # --- Load Schema using Data Handler --- 
-        logging.info("Loading DB schema and column summaries using data_handler...")
+        # --- Load Schema and Analysis using Data Handler --- 
+        logging.info("Loading DB schema and analysis using data_handler...")
         try:
-            self.full_schema, schema_docs = data_handler.load_db_schema_and_summaries(
-                self.db_path, self.cache_file, schema_analysis_llm
+            # Pass the force_regenerate flag
+            self.full_schema, schema_docs, self.detailed_schema_analysis = data_handler.load_db_schema_and_analysis(
+                self.db_path, schema_analysis_llm, force_regenerate=force_regenerate_analysis
             )
-            if not self.full_schema or not schema_docs:
+            if not self.full_schema or schema_docs is None: # schema_docs can be empty, but not None
                  logging.error("Failed to load schema or generate documents from data_handler.")
                  return False
             logging.info("Database schema loaded/analyzed.")
+            if self.detailed_schema_analysis:
+                logging.info(f"Detailed analysis loaded/generated for {len(self.detailed_schema_analysis)} columns.")
+            else:
+                logging.info("Detailed analysis not available (likely LLM issue or basic generation).")
             logging.debug(f"Full Schema Snippet:\n{self.full_schema[:500]}...")
         except Exception as e:
-             logging.error(f"Error calling data_handler.load_db_schema_and_summaries: {e}", exc_info=True)
+             logging.error(f"Error calling data_handler.load_db_schema_and_analysis: {e}", exc_info=True)
              return False
 
         # --- Establish Persistent DB Connection for Agent --- 
-        logging.info("Establishing persistent DB connection for agent...")
-        db_conn_info = data_handler.get_db_connection(self.db_path)
-        if db_conn_info:
-            self.conn, self.cursor = db_conn_info
-        else:
-            logging.error(f"Failed to establish persistent DB connection to {self.db_path}. Cannot execute queries.")
-            return False
+        if not self.conn:
+            logging.info("Establishing persistent DB connection for agent...")
+            db_conn_info = data_handler.get_db_connection(self.db_path)
+            if db_conn_info:
+                self.conn, self.cursor = db_conn_info
+            else:
+                logging.error(f"Failed to establish persistent DB connection to {self.db_path}. Cannot execute queries.")
+                return False
 
         # --- Initialize Vector Store Index using Manager --- 
-        logging.info("Initializing Vector Store Index via VectorStoreManager...")
-        try:
-             # The manager handles checking cache, loading, or building
-             _, self.query_engine = self.vector_store_manager.load_or_build_index(
-                 schema_docs=schema_docs, 
-                 embed_model=self.embed_model
-             )
-             # Check if the manager succeeded
-             if not self.query_engine:
-                  raise RuntimeError("VectorStoreManager failed to load or build index/query engine.")
-             logging.info("VectorStoreManager successfully provided query engine.")
-
-        except Exception as e:
-             # Catch errors from the manager call or the RuntimeError above
-             logging.error(f"Error during vector store initialization via manager: {e}", exc_info=True)
-             if self.conn:
-                  self.conn.close() # Cleanup connection on index failure
-             return False
+        # Re-index if forcing regeneration OR if query engine doesn't exist yet
+        if force_regenerate_analysis or not self.query_engine:
+            logging.info("Initializing/Updating Vector Store Index via VectorStoreManager...")
+            try:
+                # The manager handles checking cache, loading, or building
+                _, self.query_engine = self.vector_store_manager.load_or_build_index(
+                    schema_docs=schema_docs, 
+                    embed_model=self.embed_model,
+                    force_rebuild=force_regenerate_analysis # Pass force flag
+                )
+                # Check if the manager succeeded
+                if not self.query_engine:
+                    raise RuntimeError("VectorStoreManager failed to load or build index/query engine.")
+                logging.info("VectorStoreManager successfully provided query engine.")
+            except Exception as e:
+                logging.error(f"Error during vector store initialization via manager: {e}", exc_info=True)
+                if self.conn:
+                    self.conn.close() # Cleanup connection on index failure
+                    self.conn = None
+                    self.cursor = None
+                return False
+        else:
+            logging.info("Vector Store Index already loaded.")
         # --- Vector Store Initialization Complete --- 
 
         self.is_initialized = True
@@ -222,11 +239,17 @@ class TextToSqlAgent:
         """
         logging.info(f"Validating question: '{user_question}'")
         history_context = self.conversation_history.get_formatted_history()
+        
+        # PREPARE analysis context string (if available)
+        analysis_context = "No detailed schema analysis available."
+        if self.detailed_schema_analysis:
+            analysis_context = "\nDetailed Schema Analysis:\n" + json.dumps(self.detailed_schema_analysis, indent=2) + "\n"
 
         # Call the validation function from the llm_interface module
         return llm_interface.validate_question(
             question=user_question,
             schema=self.full_schema,
+            analysis=analysis_context,
             history=history_context,
             llm=llm
         )
@@ -248,11 +271,17 @@ class TextToSqlAgent:
             retrieved_context = "Context retrieval failed." # Provide fallback context
 
         history_context = self.conversation_history.get_formatted_history()
+        
+        # PREPARE analysis context string (if available)
+        analysis_context = "No detailed schema analysis available."
+        if self.detailed_schema_analysis:
+            analysis_context = "\nDetailed Schema Analysis:\n" + json.dumps(self.detailed_schema_analysis, indent=2) + "\n"
 
         # Call the SQL generation function from the llm_interface module
         return llm_interface.generate_sql(
             question=user_question,
             schema=self.full_schema,
+            analysis=analysis_context,
             history=history_context,
             context=retrieved_context,
             llm=llm
@@ -283,6 +312,11 @@ class TextToSqlAgent:
         """Generates a natural language analysis of the query results via llm_interface."""
         logging.info("Generating analysis for query results.")
         history_context = self.conversation_history.get_formatted_history()
+        
+        # PREPARE analysis context string (if available)
+        analysis_context = "No detailed schema analysis available."
+        if self.detailed_schema_analysis:
+            analysis_context = "\nDetailed Schema Analysis:\n" + json.dumps(self.detailed_schema_analysis, indent=2) + "\n"
 
         # Call the analysis generation function from the llm_interface module
         # Pass the cursor for header extraction
@@ -290,9 +324,11 @@ class TextToSqlAgent:
              question=user_question,
              sql=sql_query,
              query_results=query_results,
+             schema=self.full_schema,
+             analysis=analysis_context,
              history=history_context,
              llm=llm,
-             cursor=self.cursor # Pass the agent's cursor
+             cursor=self.cursor
         )
             
     def process_query(self, user_question: str, model_name: str) -> Dict[str, Optional[str]]:
@@ -349,35 +385,87 @@ class TextToSqlAgent:
 
         elif action == "SQL_NEEDED":
             logging.info("Action: SQL_NEEDED")
-            sql_query, raw_llm_sql_response = self._generate_sql_query(
-                user_question, llm
-            )
-            response["sql_query"] = sql_query
+            max_retries = 5
+            last_error_message = "An unknown error occurred during SQL processing."
+            final_sql_query = None
 
-            if sql_query:
+            for attempt in range(max_retries):
+                logging.info(f"SQL Generation/Execution Attempt {attempt + 1}/{max_retries}")
+                # Generate SQL query
+                sql_query, raw_llm_sql_response = self._generate_sql_query(
+                    user_question, llm
+                )
+                final_sql_query = sql_query # Keep track of the last generated query
+
+                if not sql_query:
+                    logging.error(f"SQL generation failed on attempt {attempt + 1}.")
+                    last_error_message = raw_llm_sql_response if raw_llm_sql_response else "I encountered an error trying to generate the SQL query needed to answer your question."
+                    response["type"] = "error"
+                    response["message"] = last_error_message
+                    self.conversation_history.add_interaction(
+                        question=user_question,
+                        response_type="error",
+                        analysis=last_error_message,
+                    )
+                    break # Exit loop if generation failed
+
+                # Execute SQL query
                 query_results = self._execute_sql_query(sql_query)
-                analysis = self._generate_analysis(
-                    user_question, sql_query, query_results, llm
-                )
-                response["message"] = analysis
-                self.conversation_history.add_interaction(
-                    question=user_question,
-                    response_type="sql_analysis",
-                    sql_query=sql_query,
-                    results=str(query_results)
-                    if not isinstance(query_results, str)
-                    else query_results,
-                    analysis=analysis,
-                )
-            else:
-                logging.error("SQL generation failed.")
-                error_msg = raw_llm_sql_response if raw_llm_sql_response else "I encountered an error trying to generate the SQL query needed to answer your question."
-                response["message"] = error_msg
-                self.conversation_history.add_interaction(
-                    question=user_question,
-                    response_type="error",
-                    analysis=response["message"],
-                )
+
+                if isinstance(query_results, str): # Execution failed, result is error string
+                    error_message = query_results
+                    last_error_message = f"SQL Execution Error: {error_message}"
+                    logging.warning(f"SQL execution failed on attempt {attempt + 1}: {error_message}")
+                    # Add error context to history for the next generation attempt
+                    self.conversation_history.add_interaction(
+                        question=f"System message for attempt {attempt + 1} failure", # Internal note for history
+                        response_type="system_error_context",
+                        sql_query=sql_query, # Log the failed query
+                        analysis=f"The previous SQL query failed with the following error: {error_message}. Please analyze the error and the schema to generate a corrected SQL query.", # Context for LLM
+                    )
+
+                    if attempt == max_retries - 1:
+                        logging.error(f"SQL query failed after {max_retries} attempts. Last error: {error_message}")
+                        response["type"] = "error"
+                        response["message"] = f"Failed to execute SQL query after {max_retries} attempts. Last error: {error_message}"
+                        response["sql_query"] = sql_query # Include the last failed query
+                        # Update history with final failure
+                        self.conversation_history.add_interaction(
+                           question=user_question,
+                           response_type="error",
+                           sql_query=sql_query,
+                           analysis=response["message"],
+                        )
+                        break # Exit loop after final failure
+                    else:
+                        continue # Go to the next attempt
+                else: # Execution successful
+                    logging.info(f"SQL execution successful on attempt {attempt + 1}.")
+                    analysis = self._generate_analysis(
+                        user_question, sql_query, query_results, llm
+                    )
+                    response["type"] = "sql_analysis" # Ensure type is set correctly on success
+                    response["message"] = analysis
+                    response["sql_query"] = sql_query
+                    self.conversation_history.add_interaction(
+                        question=user_question,
+                        response_type="sql_analysis",
+                        sql_query=sql_query,
+                        results=str(query_results),
+                        analysis=analysis,
+                    )
+                    break # Exit loop on success
+
+            # This 'else' block for the 'for' loop executes if the loop completed without a 'break'
+            # This means all retries failed, and the final state is already set in the last iteration's 'if attempt == max_retries - 1' block.
+            # However, we need to handle the case where SQL generation failed on the *first* try and broke the loop.
+            # The 'response' dict should already be populated correctly in that case too.
+            # If the loop finished normally (all retries failed), 'response' is already set with the error.
+            # If the loop broke due to success, 'response' is set with the analysis.
+            # If the loop broke due to generation failure, 'response' is set with the generation error.
+            # So, no explicit 'else' block needed here to set the response. We just ensure the final query is added if it hasn't been.
+            if response.get("sql_query") is None:
+                 response["sql_query"] = final_sql_query # Add the last attempted SQL query if not already set
 
         else:  # Should not happen based on validation logic
             logging.error(f"Invalid action '{action}' received from validation.")

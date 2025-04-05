@@ -23,6 +23,7 @@ docker run -it --name lumenai \
     -v ./secrets:/app/secrets \
     -v ./vector_store_cache:/app/vector_store_cache \
     -v ./uploads:/app/uploads \
+    -v ./schema_analysis_cache:/app/schema_analysis_cache \
     -e GOOGLE_APPLICATION_CREDENTIALS=/app/secrets/google_api_key.json \
     ${IMAGE_NAME}
 

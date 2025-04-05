@@ -73,13 +73,15 @@ class VectorStoreManager:
             return None
 
     def load_or_build_index(
-        self, schema_docs: List[Document], embed_model: BaseEmbedding
+        self, schema_docs: List[Document], embed_model: BaseEmbedding,
+        force_rebuild: bool = False
     ) -> Tuple[Optional[VectorStoreIndex], Optional[BaseQueryEngine]]:
         """Loads the index from cache if valid, otherwise builds and persists a new one.
 
         Args:
             schema_docs: List of LlamaIndex Document objects (needed for building).
             embed_model: The embedding model instance (needed for loading and building).
+            force_rebuild: If True, ignore existing cache and force rebuild.
 
         Returns:
             A tuple containing the VectorStoreIndex and the QueryEngine, 
@@ -88,7 +90,8 @@ class VectorStoreManager:
         index: Optional[VectorStoreIndex] = None
         query_engine: Optional[BaseQueryEngine] = None
 
-        if self._is_cache_valid():
+        # Check cache validity, but only load if force_rebuild is False
+        if not force_rebuild and self._is_cache_valid():
             try:
                 if not embed_model:
                      logging.error("Embed model not provided. Cannot load index from cache.")
@@ -101,8 +104,11 @@ class VectorStoreManager:
                 logging.error(f"Error loading index from cache {self.persist_dir}: {e}. Attempting rebuild.", exc_info=True)
                 index = self._build_and_persist_index(schema_docs, embed_model)
         else:
-            # Cache not valid or doesn't exist
-            logging.info("Vector store cache not found or invalid. Building new index...")
+            # Cache not valid, doesn't exist, or force_rebuild is True
+            if force_rebuild:
+                logging.info(f"Force rebuild requested. Building new index in {self.persist_dir}...")
+            else:
+                logging.info(f"Vector store cache not found or invalid in {self.persist_dir}. Building new index...")
             index = self._build_and_persist_index(schema_docs, embed_model)
 
         # If index was successfully loaded or built, create query engine

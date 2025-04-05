@@ -11,6 +11,7 @@ from typing import Optional
 from flasgger import Swagger # Import Swagger
 
 from app import TextToSqlAgent
+from data_handler import _get_schema_cache_path
 
 # --- Constants & Configuration ---
 OLD_VECTOR_DIR_SUFFIX = '_old'
@@ -78,7 +79,7 @@ def initialize_agent_if_needed():
         try:
             # Create a new agent instance or re-initialize existing one
             if agent: agent.shutdown() # Ensure old resources are released if re-initializing
-            agent = TextToSqlAgent(db_path=DB_PATH, cache_file=SCHEMA_CACHE_FILE, default_model=DEFAULT_LLM_MODEL)
+            agent = TextToSqlAgent(db_path=DB_PATH, default_model=DEFAULT_LLM_MODEL)
             if agent.load_and_index(): # Trigger the loading and indexing process
                 logging.info("Agent initialized successfully.")
                 return True
@@ -117,16 +118,27 @@ def delete_existing_data_and_caches():
             logging.error(f"Error deleting database {DB_PATH}: {e}")
             errors.append(f"DB deletion: {e}")
             
-    # Delete Schema Cache
-    if os.path.exists(SCHEMA_CACHE_FILE):
-        try:
-            os.remove(SCHEMA_CACHE_FILE)
-            deleted_files.append(SCHEMA_CACHE_FILE)
-            logging.info(f"Deleted schema cache: {SCHEMA_CACHE_FILE}")
-        except Exception as e:
-            logging.error(f"Error deleting schema cache {SCHEMA_CACHE_FILE}: {e}")
-            errors.append(f"Schema cache deletion: {e}")
-            
+    # Delete Schema Cache File (if it exists) corresponding to the deleted DB
+    # Get the expected cache file path using the helper from data_handler
+    try:
+        schema_cache_file_path = _get_schema_cache_path(DB_PATH) # DB_PATH is the path to the db that *was* deleted
+        if os.path.exists(schema_cache_file_path):
+            try:
+                os.remove(schema_cache_file_path)
+                deleted_files.append(schema_cache_file_path)
+                logging.info(f"Deleted corresponding schema cache file: {schema_cache_file_path}")
+            except Exception as e:
+                logging.error(f"Error deleting schema cache file {schema_cache_file_path}: {e}")
+                errors.append(f"Schema cache file deletion: {e}")
+        else:
+            logging.info(f"Schema cache file {schema_cache_file_path} not found, nothing to delete.")
+    except ImportError:
+        logging.error("Could not import _get_schema_cache_path from data_handler to delete cache file.")
+        errors.append("Failed to import helper for schema cache deletion.")
+    except Exception as e:
+        logging.error(f"Error determining schema cache file path for deletion: {e}")
+        errors.append(f"Error determining schema cache path: {e}")
+
     # --- Delete Vector Store Cache (Handle EBUSY gracefully) ---
     logging.info(f"Attempting to delete vector store cache: {VECTOR_STORE_CACHE_DIR}")
     if os.path.exists(VECTOR_STORE_CACHE_DIR):

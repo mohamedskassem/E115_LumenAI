@@ -175,6 +175,9 @@ src/app/secrets/
 # Vector Store Cache - DO NOT COMMIT
 src/app/vector_store_cache/
 
+# Schema Analysis Cache - DO NOT COMMIT
+src/app/schema_analysis_cache/
+
 # Dynamic Database - DO NOT COMMIT
 src/app/output/user_data.db
 

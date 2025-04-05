@@ -109,9 +109,9 @@ body {
     font-size: 15px;
     font-family: inherit;
     resize: none;
-    overflow-y: hidden; /* Hide scrollbar initially */
     min-height: 22px; /* Minimum height for single line */
     max-height: 100px; /* Maximum height before scroll */
+    overflow-y: auto; /* Change from hidden to auto */
     line-height: 1.4;
     margin-right: 10px;
     transition: border-color 0.2s ease;
