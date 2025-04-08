@@ -414,21 +414,35 @@ class TextToSqlAgent:
 
                 if isinstance(query_results, str): # Execution failed, result is error string
                     error_message = query_results
-                    last_error_message = f"SQL Execution Error: {error_message}"
-                    logging.warning(f"SQL execution failed on attempt {attempt + 1}: {error_message}")
-                    # Add error context to history for the next generation attempt
-                    self.conversation_history.add_interaction(
-                        question=f"System message for attempt {attempt + 1} failure", # Internal note for history
-                        response_type="system_error_context",
-                        sql_query=sql_query, # Log the failed query
-                        analysis=f"The previous SQL query failed with the following error: {error_message}. Please analyze the error and the schema to generate a corrected SQL query.", # Context for LLM
+                    logging.warning(f"SQL execution failed on attempt {attempt + 1}: {error_message}. Generating analysis before retrying.")
+                    
+                    # --- START ANALYSIS OF EXECUTION ERROR ---
+                    # Generate analysis of the error to potentially guide the next attempt
+                    error_analysis_feedback = self._generate_analysis(
+                        user_question, sql_query, error_message, llm
                     )
+                    logging.info(f"Analysis of execution error: {error_analysis_feedback}")
+                    
+                    # Prepare context for the next LLM generation attempt using the analysis
+                    retry_context = f"The previous SQL query (`{sql_query}`) failed to execute. Analysis of the error suggests: '{error_analysis_feedback}'. Please generate a revised SQL query based on this analysis."
+                    last_error_message = f"SQL Execution Error Analysis: {error_analysis_feedback}" # Update last error for final message if needed
+                    
+                    # Add analysis context to history for the next generation attempt
+                    self.conversation_history.add_interaction(
+                        question=f"System: Analyzing execution error from attempt {attempt + 1}", # Internal note
+                        response_type="system_error_analysis_context", # New type for clarity
+                        sql_query=sql_query, # Log the failed query
+                        analysis=retry_context # Provide analysis and instruction for retry
+                    )
+                    # --- END ANALYSIS OF EXECUTION ERROR ---
 
                     if attempt == max_retries - 1:
-                        logging.error(f"SQL query failed after {max_retries} attempts. Last error: {error_message}")
+                        logging.error(f"SQL query failed after {max_retries} attempts. Last error analysis: {error_analysis_feedback}")
+                        # Use the analysis feedback in the final error message
+                        final_error_message = f"Failed to execute SQL query after {max_retries} attempts. Analysis of the last error: '{error_analysis_feedback}'. Last SQL: {sql_query}"
                         response["type"] = "error"
-                        response["message"] = f"Failed to execute SQL query after {max_retries} attempts. Last error: {error_message}"
-                        response["sql_query"] = sql_query # Include the last failed query
+                        response["message"] = final_error_message
+                        response["sql_query"] = sql_query
                         # Update history with final failure
                         self.conversation_history.add_interaction(
                            question=user_question,
@@ -438,21 +452,76 @@ class TextToSqlAgent:
                         )
                         break # Exit loop after final failure
                     else:
-                        continue # Go to the next attempt
+                        continue # Go to the next attempt with the analysis context added
                 else: # Execution successful
                     logging.info(f"SQL execution successful on attempt {attempt + 1}.")
-                    analysis = self._generate_analysis(
+
+                    # --- START NULL CHECK & ANALYSIS-DRIVEN RETRY ---
+                    should_retry_due_to_nulls = False
+                    null_analysis_feedback = ""
+                    if query_results and len(query_results) > 0: # Check if results exist
+                        num_columns = len(query_results[0]) if query_results else 0
+                        # Heuristic: Check if the last column is consistently None
+                        if num_columns > 0:
+                            last_col_index = num_columns - 1
+                            all_last_col_null = all(row[last_col_index] is None for row in query_results)
+
+                            if all_last_col_null:
+                                logging.warning(f"Detected potential issue: Last column is NULL for all {len(query_results)} rows. Generating analysis before retrying.")
+                                should_retry_due_to_nulls = True
+                                # Generate analysis of the NULL results to guide the next attempt
+                                null_analysis_feedback = self._generate_analysis(
+                                     user_question, sql_query, query_results, llm
+                                )
+                                logging.info(f"Analysis of NULL results: {null_analysis_feedback}")
+                                
+                                # Prepare context for the next LLM generation attempt
+                                retry_context = f"The previous SQL query (`{sql_query}`) executed but returned NULLs in the result's main column. Analysis suggests: '{null_analysis_feedback}'. Please generate a revised SQL query to address this issue."
+                                
+                                self.conversation_history.add_interaction(
+                                    question=f"System: Analyzing NULL results from attempt {attempt + 1}", # Internal note
+                                    response_type="system_null_analysis_context",
+                                    sql_query=sql_query,
+                                    results=str(query_results), # Log the null results
+                                    analysis=retry_context # Provide analysis and instruction for retry
+                                )
+                    
+                    if should_retry_due_to_nulls:
+                        if attempt == max_retries - 1:
+                             logging.error(f"Query still returned NULLs after {max_retries} attempts. Last SQL: {sql_query}")
+                             # Use the last analysis feedback in the error message
+                             final_error_message = f"Failed to get valid results after {max_retries} attempts. The last query produced NULL values. Analysis of the issue: '{null_analysis_feedback}'. Last SQL: {sql_query}"
+                             response["type"] = "error"
+                             response["message"] = final_error_message
+                             response["sql_query"] = sql_query
+                             # Update history with final failure
+                             self.conversation_history.add_interaction(
+                                question=user_question,
+                                response_type="error",
+                                sql_query=sql_query,
+                                analysis=response["message"],
+                             )
+                             break # Exit loop after final failure
+                        else:
+                             continue # Go to the next attempt with the analysis context added
+                    # --- END NULL CHECK & ANALYSIS-DRIVEN RETRY ---
+
+                    # If no NULL issue detected OR if a retry was successful (not handled here, handled by loop break),
+                    # generate the final user-facing analysis.
+                    # Note: If should_retry_due_to_nulls was true, we 'continue'd, so this part only runs
+                    # when the results are deemed okay on the current attempt.
+                    final_analysis = self._generate_analysis(
                         user_question, sql_query, query_results, llm
                     )
-                    response["type"] = "sql_analysis" # Ensure type is set correctly on success
-                    response["message"] = analysis
+                    response["type"] = "sql_analysis"
+                    response["message"] = final_analysis
                     response["sql_query"] = sql_query
                     self.conversation_history.add_interaction(
                         question=user_question,
                         response_type="sql_analysis",
                         sql_query=sql_query,
                         results=str(query_results),
-                        analysis=analysis,
+                        analysis=final_analysis,
                     )
                     break # Exit loop on success
 
