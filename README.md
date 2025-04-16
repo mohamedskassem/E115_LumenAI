@@ -1,5 +1,7 @@
 # LumenAI: Conversational Text-to-SQL Agent
 
+![LumenAI User Interface](img/UI.png)
+
 This project implements a containerized conversational agent that allows users to query a database (e.g., Adventure Works) using natural language through a web interface.
 
 ## Key Features & Enhancements
@@ -93,6 +95,12 @@ graph LR
     B -- HTTP Response (JSON / HTML) --> A;
     B -- Serves /apidocs --> A;
 ```
+
+### Architecture Diagram Images
+
+![Architecture Diagram 1](img/arch1.png)
+![Architecture Diagram 2](img/arch2.png)
+![Architecture Diagram 3](img/arch3.png)
 
 ## Project Structure
 
