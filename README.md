@@ -64,7 +64,7 @@ graph LR
     A[Browser UI] -- HTTP Requests (incl. chat_id) --> B(Flask API / Flasgger - server.py);
 
     subgraph Backend State Management
-        B -- Manages --> AGENTS{Active Agents (Dict[chat_id, TextToSqlAgent])};
+        B -- Manages --> AGENTS{"Active Agents (Dict[chat_id, TextToSqlAgent])"};
         B -- Manages --> SHARED[Shared Data Components (Index, Embeddings, Schema Analysis)];
     end
 
