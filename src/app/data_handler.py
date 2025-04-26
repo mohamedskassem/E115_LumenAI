@@ -4,7 +4,9 @@ import json
 import logging
 import concurrent.futures
 import time
-from typing import List, Tuple, Dict, Optional
+from typing import List, Tuple, Dict, Optional, Union
+
+import google.generativeai as genai
 
 # Assuming necessary LlamaIndex components are available if needed
 # We need Document for return type, OpenAI for type hint, PromptTemplate for LLM call
@@ -20,7 +22,7 @@ def _get_schema_cache_path(db_path: str) -> str:
     cache_filename = f"{db_filename}.json"
     return os.path.join(SCHEMA_ANALYSIS_CACHE_DIR, cache_filename)
 
-def _analyze_column(col_name, table_name, sample_data, llm: Optional[OpenAI]):
+def _analyze_column(col_name, table_name, sample_data, llm: Optional[Union[OpenAI, genai.GenerativeModel]]):
     """Analyzes a single column using the provided LLM instance."""
     # Handle case where LLM initialization might have failed
     if llm is None:
@@ -37,21 +39,32 @@ def _analyze_column(col_name, table_name, sample_data, llm: Optional[OpenAI]):
     Keep the response under 2 sentences.
     """
     try:
-        # Use .complete for newer LlamaIndex versions if .predict is deprecated
-        # Assuming .predict is still valid for the version in use based on original code
-        response = llm.predict(PromptTemplate(template=combined_prompt))
-        # REMOVED time.sleep(1) - Let's keep delays out of the handler for now
+        response_text = "(LLM analysis not performed)"
+        if isinstance(llm, OpenAI):
+            # LlamaIndex OpenAI predict for schema analysis seems to require PromptTemplate
+            response = llm.predict(PromptTemplate(template=combined_prompt))
+            response_text = response.strip()
+        elif isinstance(llm, genai.GenerativeModel):
+            # Use google-generativeai
+            response = llm.generate_content(combined_prompt)
+            # Handle potential safety blocks or errors
+            if response.parts:
+                response_text = response.text.strip() # Access text via .text
+            else:
+                logging.warning(f"GenAI response for {table_name}.{col_name} blocked or empty. Reason: {response.prompt_feedback}")
+                response_text = "(LLM analysis blocked or empty)"
+
         doc_text = (
             f"Table: {table_name}\n"
             f"Column: {col_name}\n"
-            f"Summary: {response.strip()}"
+            f"Summary: {response_text}"
         )
         # Store raw analysis text and structured info
         return {
             "text": doc_text,
             "table": table_name,
             "column": col_name,
-            "analysis": response.strip()
+            "analysis": response_text
         }
     except Exception as e:
         logging.error(
@@ -67,8 +80,8 @@ def _analyze_column(col_name, table_name, sample_data, llm: Optional[OpenAI]):
         }
 
 def _process_table(
-    table_info: Tuple[str, List[Tuple], List[Tuple], dict], llm: Optional[OpenAI]
-) -> Tuple[str, List[Dict]]: # Return list of dicts now
+    table_info: Tuple[str, List[Tuple], List[Tuple], dict], llm: Optional[Union[OpenAI, genai.GenerativeModel]]
+) -> Tuple[str, List[Dict]]:
     """Processes a single table and its columns."""
     table_name, columns, sample_data, column_indices = table_info
     table_schema = f"Table: {table_name}\n"
@@ -94,13 +107,13 @@ def _process_table(
     return table_schema, analysis_results
 
 def load_db_schema_and_analysis(
-    db_path: str, analysis_llm: Optional[OpenAI], force_regenerate: bool = False
+    db_path: str, analysis_llm: Optional[Union[OpenAI, genai.GenerativeModel]], force_regenerate: bool = False
 ) -> Tuple[str, List[Document], Optional[Dict]]:
     """Loads database schema and detailed analysis, using or generating cache.
 
     Args:
         db_path: Path to the SQLite database file.
-        analysis_llm: An initialized OpenAI LLM instance (or None if LLM analysis failed/skipped).
+        analysis_llm: An initialized LLM instance (OpenAI or genai.GenerativeModel) or None.
         force_regenerate: If True, ignores existing cache and regenerates analysis.
 
     Returns:
@@ -149,7 +162,16 @@ def load_db_schema_and_analysis(
 
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
         tables = cursor.fetchall()
-        logging.info(f"Found {len(tables)} tables. Analyzing schema (using {analysis_llm.model if analysis_llm else 'No LLM'})...")
+
+        llm_type_str = "No LLM"
+        if isinstance(analysis_llm, OpenAI):
+            llm_type_str = f"OpenAI ({analysis_llm.model})"
+        elif isinstance(analysis_llm, genai.GenerativeModel):
+            # genai model name access might differ, adjust if needed
+            # Using a placeholder for now
+            llm_type_str = f"Google GenAI ({analysis_llm._model_name})"
+
+        logging.info(f"Found {len(tables)} tables. Analyzing schema (using {llm_type_str})...")
 
         table_data = []
         for table in tables:

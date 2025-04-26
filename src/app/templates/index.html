@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>LumenAI - Chat with your Data</title>
+    <link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}" type="image/svg+xml">
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -13,60 +14,70 @@
 <body>
     <div class="main-container">
 
-        <!-- Data Loading Section (Initially Visible if no data) -->
-        <div id="dataLoaderSection" class="data-loader-section">
-            <header class="header">
-                <h1>Lumen<span class="ai-suffix">AI</span></h1>
-                <p>Upload CSV files to chat with your data.</p>
-            </header>
-            <div class="upload-area">
-                <label for="csvUpload" class="upload-button">Select CSV Files</label>
-                <input type="file" id="csvUpload" accept=".csv" multiple>
-                <span id="fileInfo" class="file-info">No files selected</span>
-                <button id="uploadButton" class="action-button" disabled>Upload & Replace Data</button>
+        <!-- Sidebar for Chat List -->
+        <div class="sidebar">
+            <div class="sidebar-header">
+                <h2>Chats</h2>
+                <button id="newChatButton" title="Start New Chat" disabled>+</button>
             </div>
-            <div id="uploadStatus" class="status-message"></div>
+            <ul id="chatList" class="chat-list">
+                <!-- Chat list items will be populated by JS -->
+            </ul>
         </div>
 
-        <!-- Chat Section (Initially Hidden if no data) -->
-        <div id="chatSection" class="chat-container" style="display: none;">
-            <header class="header chat-header">
-                <h1>Lumen<span class="ai-suffix">AI</span></h1>
-                <div class="header-controls">
-                     <button id="removeDataButton" class="remove-button" title="Remove current data and index">Remove Data</button>
+        <!-- Main Content Area -->
+        <div class="content-area">
+
+            <!-- Data Loading Section (Initially Visible if no data) -->
+            <div id="dataLoaderSection" class="data-loader-section">
+                <header class="header">
+                    <img src="{{ url_for('static', filename='logo.svg') }}" alt="LumenAI Logo" class="header-logo">
+                    <p>Upload CSV files to chat with your data.</p>
+                </header>
+                <div class="upload-area">
+                    <label for="csvUpload" class="upload-button">Select CSV Files</label>
+                    <input type="file" id="csvUpload" accept=".csv" multiple>
+                    <span id="fileInfo" class="file-info">No files selected</span>
+                    <button id="uploadButton" class="action-button" disabled>Upload & Replace Data</button>
                 </div>
-            </header>
+                <div id="uploadStatus" class="status-message"></div>
+            </div>
 
-            <div class="model-selector-area">
-                 <label for="modelSelector">Model:</label>
-                 <select id="modelSelector" name="model">
-                     <option value="gpt-4-turbo">GPT-4 Turbo</option>
-                     <option value="gemini-2.5-pro-exp-03-25" selected>Gemini 2.5 Pro Exp (03-25)</option>
-                 </select>
-                 <button id="refreshIndexButton" class="refresh-button" title="Clear cache & re-index schema">Refresh Index</button>
-             </div>
+            <!-- Chat Section (Initially Hidden if no data) -->
+            <div id="chatSection" class="chat-container" style="display: none;">
+                <header class="header chat-header">
+                    <img src="{{ url_for('static', filename='logo.svg') }}" alt="LumenAI Logo" class="header-logo">
+                    <div class="header-controls">
+                         <!-- Model Selector Moved Here -->
+                         <label for="modelSelector">Model:</label>
+                         <select id="modelSelector" name="model">
+                             <option value="gpt-4-turbo">GPT-4 Turbo</option>
+                             <option value="gemini-2.5-pro-preview-03-25" selected>Gemini 2.5 Pro</option>
+                             <!-- Add other models as needed -->
+                         </select>
+                          <button id="removeDataButton" class="remove-button" title="Remove ALL data and chats">Remove All Data</button>
+                    </div>
+                </header>
 
-             <div id="chatbox" class="chatbox">
-                 <!-- Welcome message added by JS -->
-             </div>
+                 <div id="chatbox" class="chatbox">
+                     <!-- Messages dynamically added -->
+                 </div>
 
-             <div class="input-area">
-                 <textarea id="userInput" placeholder="Ask a question about the loaded data..." rows="1"></textarea>
-                 <button id="sendButton">
-                     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="send-icon">
-                         <path d="M3.478 2.404a.75.75 0 0 0-.926.941l2.432 7.905H13.5a.75.75 0 0 1 0 1.5H4.984l-2.432 7.905a.75.75 0 0 0 .926.94 60.519 60.519 0 0 0 18.445-8.986.75.75 0 0 0 0-1.218A60.517 60.517 0 0 0 3.478 2.404Z" />
-                     </svg>
-                 </button>
-             </div>
-             <div id="loadingIndicator" class="loading-indicator" style="display: none;">
-                 <div class="spinner"></div>
-                 <span>Thinking...</span>
-             </div>
-              <div id="sqlDisplay" class="sql-display" style="display: none;">
-                 <h4>Generated SQL:</h4>
-                 <pre><code id="sqlCode"></code></pre>
-             </div>
-        </div>
+                 <div class="input-area">
+                     <textarea id="userInput" placeholder="Ask a question..." rows="1"></textarea>
+                     <button id="sendButton">
+                         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="send-icon">
+                             <path d="M3.478 2.404a.75.75 0 0 0-.926.941l2.432 7.905H13.5a.75.75 0 0 1 0 1.5H4.984l-2.432 7.905a.75.75 0 0 0 .926.94 60.519 60.519 0 0 0 18.445-8.986.75.75 0 0 0 0-1.218A60.517 60.517 0 0 0 3.478 2.404Z" />
+                         </svg>
+                     </button>
+                 </div>
+                 <div id="loadingIndicator" class="loading-indicator" style="display: none;">
+                     <div class="spinner"></div>
+                     <span>Thinking...</span>
+                 </div>
+            </div>
+
+        </div> <!-- End of content-area -->
 
     </div> <!-- End of main-container -->
 

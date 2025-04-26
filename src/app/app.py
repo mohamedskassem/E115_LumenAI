@@ -6,6 +6,7 @@ import concurrent.futures
 import time # Import time module
 from typing import List, Tuple, Dict, Optional, Union
 import logging
+import google.generativeai as genai # NEW IMPORT
 from llama_index.core import Document # Still needed for type hints
 from llama_index.core import Settings # Still needed? Check usage
 from llama_index.core import PromptTemplate # Still needed? Check usage - Yes, for LLM interface
@@ -41,6 +42,19 @@ except FileNotFoundError:
     # For now, we'll proceed, but OpenAI calls will fail.
     pass
 
+try:
+    with open("secrets/google_api_key.txt", "r") as key_file:
+        os.environ["GOOGLE_API_KEY"] = key_file.read().strip()
+        # Configure google.generativeai globally if key found
+        genai.configure(api_key=os.environ["GOOGLE_API_KEY"])
+        logging.info("Configured google-generativeai using GOOGLE_API_KEY from secrets.")
+except FileNotFoundError:
+    logging.info(
+        "secrets/google_api_key.txt not found. Will rely on Application Default Credentials (ADC) if GOOGLE_APPLICATION_CREDENTIALS is set."
+    )
+    # No explicit configure call here, genai library handles ADC lookup
+    pass # Proceed, Gemini calls might use ADC
+
 # Disable tokenizer parallelism warnings
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -49,7 +63,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 # Conversation History Class
 # ------------------------------
 class ConversationHistory:
-    def __init__(self, max_history: int = 5):
+    def __init__(self, max_history: int = 50):
         self.history: List[Dict] = []
         self.max_history = max_history
         logging.info(f"ConversationHistory initialized with max_history={max_history}")
@@ -100,152 +114,195 @@ class ConversationHistory:
 class TextToSqlAgent:
     def __init__(
         self,
-        db_path: str,
-        default_model: str = "gpt-4-turbo",
+        db_path: str, # Keep db_path for reference, maybe connection management
+        agent_id: str = "default_agent", # Add an identifier
+        chat_title: str = "New Chat" # Initialize title
     ):
-        logging.info("Initializing TextToSqlAgent object...")
-        # Configuration details stored, but initialization deferred
-        persist_dir = "vector_store_cache"  # Directory to store the index
+        """Initializes agent configuration, deferring resource loading."""
+        self.agent_id = agent_id
+        logging.info(f"Initializing TextToSqlAgent object (ID: {self.agent_id})...")
         self.db_path = db_path
-        self.default_model = (
-            default_model  # Model for schema analysis and default queries
-        )
         self.initialized_llms: Dict[
-            str, Union[OpenAI, Gemini]
-        ] = {}  # Cache for dynamically loaded LLMs
-        self.embed_model = None  # Initialized in load_and_index
-        # self.index = None  # Managed by VectorStoreManager
-        self.query_engine: Optional[BaseQueryEngine] = None  # Set by load_and_index
-        self.conn = None  # Initialized in load_and_index
-        self.cursor = None  # Initialized in load_and_index
-        self.full_schema = ""  # Initialized in load_and_index
-        self.detailed_schema_analysis: Optional[Dict] = None # NEW: Store detailed analysis
-        self.conversation_history = ConversationHistory()
-        # Initialize the Vector Store Manager
-        self.vector_store_manager = VectorStoreManager(persist_dir=persist_dir)
-        self.is_initialized = False  # Flag to track if indexing is complete
-        # Defer actual initialization until load_and_index is called
+            str, Union[OpenAI, genai.GenerativeModel]
+        ] = {}  # Cache for dynamically loaded LLMs per agent
 
-    def load_and_index(self, force_regenerate_analysis: bool = False):
-        """Loads data, initializes components, builds/loads index, loads/generates schema analysis.
-        
-        Args:
-            force_regenerate_analysis: If True, force regeneration of schema analysis cache.
+        # These will be set by `initialize_from_loaded_data`
+        self.embed_model: Optional[OpenAIEmbedding] = None
+        self.query_engine: Optional[BaseQueryEngine] = None
+        self.conn: Optional[sqlite3.Connection] = None
+        self.cursor: Optional[sqlite3.Cursor] = None
+        self.full_schema: str = ""
+        self.detailed_schema_analysis: Optional[Dict] = None
+        self.is_initialized: bool = False
+        self.chat_title: str = chat_title # Initialize title
+
+        self.conversation_history = ConversationHistory() # Each agent gets its own history
+        logging.info(f"Agent {self.agent_id} created with fresh conversation history.")
+
+
+    # --- Data Loading and Indexing (Static/Class Method - Run Once Globally) ---
+    @staticmethod
+    def load_and_index_data(
+        db_path: str,
+        persist_dir: str = "vector_store_cache",
+        force_regenerate_analysis: bool = False
+    ) -> Optional[Dict[str, object]]:
         """
-        if self.is_initialized and not force_regenerate_analysis:
-            logging.info("Agent already initialized and not forcing regeneration.")
-            return True
+        Loads data, initializes shared components (embeddings, schema, index),
+        and returns them for agents to use. This should be run once per dataset load.
 
-        if not os.path.exists(self.db_path):
-            logging.error(
-                f"Database path does not exist: {self.db_path}. Cannot initialize."
-            )
-            return False
+        Args:
+            db_path: Path to the database.
+            persist_dir: Directory for vector store cache.
+            force_regenerate_analysis: Force regeneration of schema analysis and index.
 
-        logging.info(f"Starting initialization and indexing for DB: {self.db_path} (Force Analysis Regen: {force_regenerate_analysis})")
-        
-        # --- Initialize Embeddings --- 
-        if not self.embed_model:
-            logging.info("Initializing Embeddings...")
-            try:
-                logging.info("Initializing OpenAI Embeddings (text-embedding-3-small)...")
-                self.embed_model = OpenAIEmbedding(model="text-embedding-3-small")
-                if not self.embed_model:
-                    raise ValueError("Embedding model initialization failed.")
-            except Exception as e:
-                logging.error(f"Error initializing Embeddings: {e}", exc_info=True)
-                return False # Cannot proceed without embeddings
+        Returns:
+            A dictionary containing initialized components ('embed_model', 'full_schema',
+            'detailed_schema_analysis', 'query_engine', 'db_connection') or None on failure.
+        """
+        logging.info(f"Starting GLOBAL data loading/indexing for DB: {db_path} (Force Regen: {force_regenerate_analysis})")
 
-        # --- Initialize dedicated LLM for Schema Analysis --- 
-        schema_analysis_model_name = "gpt-4-turbo" 
+        if not os.path.exists(db_path):
+            logging.error(f"Database path does not exist: {db_path}. Cannot initialize.")
+            return None
+
+        # --- Initialize Embeddings (Shared) ---
+        embed_model = None
+        try:
+            logging.info("Initializing SHARED OpenAI Embeddings (text-embedding-3-small)...")
+            embed_model = OpenAIEmbedding(model="text-embedding-3-small")
+            if not embed_model:
+                raise ValueError("Shared Embedding model initialization failed.")
+        except Exception as e:
+            logging.error(f"Error initializing SHARED Embeddings: {e}", exc_info=True)
+            return None # Cannot proceed without embeddings
+
+        # --- Initialize dedicated LLM for Schema Analysis (Temporary for this step) ---
+        schema_analysis_model_name = "gpt-4-turbo" # Or choose another robust model
         schema_analysis_llm = None
         try:
-            logging.info(f"Initializing {schema_analysis_model_name} specifically for schema analysis...")
-            # Use self._get_llm to leverage caching if the same model is requested later
-            # Note: This assumes _get_llm can handle OpenAI models
-            schema_analysis_llm = self._get_llm(schema_analysis_model_name)
-            # Add specific check for OpenAI API key if needed for this model
-            if isinstance(schema_analysis_llm, OpenAI) and not os.environ.get("OPENAI_API_KEY"):
-                logging.warning("OpenAI API Key not found, needed for schema analysis. Analysis will be basic.")
-                schema_analysis_llm = None # Nullify if key missing
+            logging.info(f"Initializing {schema_analysis_model_name} temporarily for schema analysis...")
+            # Use a temporary instance, don't cache it in the static method
+            if schema_analysis_model_name.startswith("gpt-"):
+                 if os.environ.get("OPENAI_API_KEY"):
+                      schema_analysis_llm = OpenAI(model=schema_analysis_model_name)
+                 else:
+                      logging.warning("OpenAI API Key not found, needed for schema analysis. Analysis will be basic.")
+            elif schema_analysis_model_name.startswith("gemini-"):
+                 # Check if genai is configured (via key or ADC)
+                 if os.getenv("GOOGLE_API_KEY") or os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+                      try:
+                          schema_analysis_llm = genai.GenerativeModel(schema_analysis_model_name)
+                      except Exception as gemini_e:
+                           logging.error(f"Failed to initialize temporary Gemini for schema analysis: {gemini_e}")
+                 else:
+                      logging.warning("Google API Key/Credentials not found, needed for schema analysis with Gemini. Analysis will be basic.")
+            else:
+                logging.warning(f"Unsupported model for schema analysis: {schema_analysis_model_name}")
+
         except Exception as e:
             logging.error(f"Failed to initialize {schema_analysis_model_name} for schema analysis: {e}. Schema summaries might be basic.", exc_info=True)
-            # Proceed even if LLM fails, data_handler generates basic summaries/cache
 
-        # --- Load Schema and Analysis using Data Handler --- 
-        logging.info("Loading DB schema and analysis using data_handler...")
+        # --- Load Schema and Analysis using Data Handler ---
+        full_schema, schema_docs, detailed_schema_analysis = None, None, None
         try:
-            # Pass the force_regenerate flag
-            self.full_schema, schema_docs, self.detailed_schema_analysis = data_handler.load_db_schema_and_analysis(
-                self.db_path, schema_analysis_llm, force_regenerate=force_regenerate_analysis
+            logging.info("Loading DB schema and analysis using data_handler...")
+            full_schema, schema_docs, detailed_schema_analysis = data_handler.load_db_schema_and_analysis(
+                db_path, schema_analysis_llm, force_regenerate=force_regenerate_analysis
             )
-            if not self.full_schema or schema_docs is None: # schema_docs can be empty, but not None
+            if not full_schema or schema_docs is None:
                  logging.error("Failed to load schema or generate documents from data_handler.")
-                 return False
+                 return None
             logging.info("Database schema loaded/analyzed.")
-            if self.detailed_schema_analysis:
-                logging.info(f"Detailed analysis loaded/generated for {len(self.detailed_schema_analysis)} columns.")
-            else:
-                logging.info("Detailed analysis not available (likely LLM issue or basic generation).")
-            logging.debug(f"Full Schema Snippet:\n{self.full_schema[:500]}...")
+            logging.debug(f"Full Schema Snippet:\n{full_schema[:500]}...")
         except Exception as e:
              logging.error(f"Error calling data_handler.load_db_schema_and_analysis: {e}", exc_info=True)
-             return False
+             return None
 
-        # --- Establish Persistent DB Connection for Agent --- 
-        if not self.conn:
-            logging.info("Establishing persistent DB connection for agent...")
-            db_conn_info = data_handler.get_db_connection(self.db_path)
-            if db_conn_info:
-                self.conn, self.cursor = db_conn_info
-            else:
-                logging.error(f"Failed to establish persistent DB connection to {self.db_path}. Cannot execute queries.")
-                return False
+        # --- Initialize Vector Store Index using Manager (Shared Query Engine) ---
+        vector_store_manager = VectorStoreManager(persist_dir=persist_dir)
+        query_engine = None
+        try:
+            logging.info("Initializing/Updating SHARED Vector Store Index via VectorStoreManager...")
+            # The manager handles checking cache, loading, or building
+            _, query_engine = vector_store_manager.load_or_build_index(
+                schema_docs=schema_docs,
+                embed_model=embed_model, # Pass the shared embed model
+                force_rebuild=force_regenerate_analysis
+            )
+            if not query_engine:
+                raise RuntimeError("VectorStoreManager failed to load or build index/query engine.")
+            logging.info("VectorStoreManager successfully provided SHARED query engine.")
+        except Exception as e:
+            logging.error(f"Error during SHARED vector store initialization via manager: {e}", exc_info=True)
+            return None
 
-        # --- Initialize Vector Store Index using Manager --- 
-        # Re-index if forcing regeneration OR if query engine doesn't exist yet
-        if force_regenerate_analysis or not self.query_engine:
-            logging.info("Initializing/Updating Vector Store Index via VectorStoreManager...")
-            try:
-                # The manager handles checking cache, loading, or building
-                _, self.query_engine = self.vector_store_manager.load_or_build_index(
-                    schema_docs=schema_docs, 
-                    embed_model=self.embed_model,
-                    force_rebuild=force_regenerate_analysis # Pass force flag
-                )
-                # Check if the manager succeeded
-                if not self.query_engine:
-                    raise RuntimeError("VectorStoreManager failed to load or build index/query engine.")
-                logging.info("VectorStoreManager successfully provided query engine.")
-            except Exception as e:
-                logging.error(f"Error during vector store initialization via manager: {e}", exc_info=True)
-                if self.conn:
-                    self.conn.close() # Cleanup connection on index failure
-                    self.conn = None
-                    self.cursor = None
-                return False
+        # --- Establish DB Connection (Maybe per-agent or shared carefully?) ---
+        # For simplicity in Flask, creating a connection per agent might be safer
+        # due to thread-safety concerns with shared SQLite connections across requests.
+        # Let's return None here and let the agent instance create its own.
+        # db_connection_info = data_handler.get_db_connection(db_path)
+        # if not db_connection_info:
+        #     logging.error(f"Failed to establish DB connection to {db_path}.")
+        #     # Decide if this is fatal. Maybe agents can try connecting individually?
+        #     # Let's make it non-fatal for now.
+        #     db_connection_info = None # Set to None if failed
+
+        logging.info("GLOBAL data loading/indexing complete.")
+        return {
+            "embed_model": embed_model,
+            "full_schema": full_schema,
+            "detailed_schema_analysis": detailed_schema_analysis,
+            "query_engine": query_engine,
+            # "db_connection": db_connection_info # Don't return connection
+        }
+
+    # --- Instance Initialization ---
+    def initialize_from_loaded_data(
+        self,
+        embed_model: OpenAIEmbedding,
+        full_schema: str,
+        detailed_schema_analysis: Optional[Dict],
+        query_engine: BaseQueryEngine,
+        # db_connection_info: Optional[Tuple[sqlite3.Connection, sqlite3.Cursor]]
+    ) -> bool:
+        """Initializes this agent instance with pre-loaded shared data."""
+        logging.info(f"Initializing agent instance {self.agent_id} from pre-loaded data...")
+        self.embed_model = embed_model
+        self.full_schema = full_schema
+        self.detailed_schema_analysis = detailed_schema_analysis
+        self.query_engine = query_engine
+
+        # Establish a dedicated DB connection for this agent instance
+        logging.info(f"Establishing dedicated DB connection for agent {self.agent_id}...")
+        db_connection_info = data_handler.get_db_connection(self.db_path)
+        if db_connection_info:
+            self.conn, self.cursor = db_connection_info
+            logging.info(f"Dedicated DB connection established for agent {self.agent_id}.")
         else:
-            logging.info("Vector Store Index already loaded.")
-        # --- Vector Store Initialization Complete --- 
+            logging.error(f"Failed to establish DB connection for agent {self.agent_id}. Queries will fail.")
+            self.is_initialized = False
+            return False
 
         self.is_initialized = True
-        logging.info("Agent initialization and indexing complete.")
+        logging.info(f"Agent instance {self.agent_id} initialized successfully.")
         return True
+
+    # --- Core Agent Logic (Methods operate on instance data) ---
 
     def _validate_question(self, user_question: str, llm: llm_interface.LlmType) -> Dict[str, str]:
         """
         Uses LLM (via llm_interface) to validate if the question needs SQL,
-        can be answered directly, or requires clarification.
+        can be answered directly, or requires clarification. Uses instance history.
         """
-        logging.info(f"Validating question: '{user_question}'")
-        history_context = self.conversation_history.get_formatted_history()
-        
-        # PREPARE analysis context string (if available)
+        if not self.is_initialized: return {"action": "ERROR", "details": "Agent not initialized"}
+        logging.info(f"Agent {self.agent_id} validating question: '{user_question}'")
+        history_context = self.conversation_history.get_formatted_history() # Use instance history
+
         analysis_context = "No detailed schema analysis available."
         if self.detailed_schema_analysis:
             analysis_context = "\nDetailed Schema Analysis:\n" + json.dumps(self.detailed_schema_analysis, indent=2) + "\n"
 
-        # Call the validation function from the llm_interface module
         return llm_interface.validate_question(
             question=user_question,
             schema=self.full_schema,
@@ -253,31 +310,29 @@ class TextToSqlAgent:
             history=history_context,
             llm=llm
         )
-            
-    def _generate_sql_query(self, user_question: str, llm: llm_interface.LlmType) -> Tuple[Optional[str], str]:
-        """Generates SQL query using context, schema, history via llm_interface."""
-        logging.info(f"Generating SQL for question: '{user_question}'")
-        # Ensure query engine is available before attempting context retrieval
-        if not self.query_engine:
-             logging.error("Query engine not available for context retrieval.")
-             return None, "Error: Query engine not initialized."
-             
-        try:
-            # Retrieve context using the agent's query engine
-            retrieved_context = str(self.query_engine.query(user_question))
-            logging.debug(f"Retrieved context for SQL generation: {retrieved_context}")
-        except Exception as e:
-            logging.error(f"Error retrieving context from query engine: {e}", exc_info=True)
-            retrieved_context = "Context retrieval failed." # Provide fallback context
 
-        history_context = self.conversation_history.get_formatted_history()
-        
-        # PREPARE analysis context string (if available)
+    def _generate_sql_query(self, user_question: str, llm: llm_interface.LlmType) -> Tuple[Optional[str], str]:
+        """Generates SQL query using instance context, schema, history via llm_interface."""
+        if not self.is_initialized: return None, "Agent not initialized"
+        logging.info(f"Agent {self.agent_id} generating SQL for question: '{user_question}'")
+        if not self.query_engine:
+             logging.error(f"Agent {self.agent_id}: Query engine not available.")
+             return None, "Error: Query engine not initialized."
+
+        try:
+            # Use the shared query engine assigned to this instance
+            retrieved_context = str(self.query_engine.query(user_question))
+            logging.debug(f"Agent {self.agent_id}: Retrieved context for SQL generation: {retrieved_context}")
+        except Exception as e:
+            logging.error(f"Agent {self.agent_id}: Error retrieving context from query engine: {e}", exc_info=True)
+            retrieved_context = "Context retrieval failed."
+
+        history_context = self.conversation_history.get_formatted_history() # Use instance history
+
         analysis_context = "No detailed schema analysis available."
         if self.detailed_schema_analysis:
             analysis_context = "\nDetailed Schema Analysis:\n" + json.dumps(self.detailed_schema_analysis, indent=2) + "\n"
 
-        # Call the SQL generation function from the llm_interface module
         return llm_interface.generate_sql(
             question=user_question,
             schema=self.full_schema,
@@ -286,40 +341,40 @@ class TextToSqlAgent:
             context=retrieved_context,
             llm=llm
         )
-            
+
     def _execute_sql_query(self, sql_query: str) -> Union[List[Tuple], str]:
-        """Executes the generated SQL query against the database."""
-        logging.info(f"Executing SQL: {sql_query}")
+        """Executes the generated SQL query against the instance's DB cursor."""
+        if not self.is_initialized: return "Agent not initialized"
+        logging.info(f"Agent {self.agent_id} executing SQL: {sql_query}")
         if not self.cursor:
-            logging.error("Database cursor is not initialized.")
-            return "Error: Database connection is not available."
+            logging.error(f"Agent {self.agent_id}: Database cursor is not initialized.")
+            return "Error: Database connection is not available for this agent."
         try:
             self.cursor.execute(sql_query)
             results = self.cursor.fetchall()
-            logging.info(f"Query executed successfully, {len(results)} rows returned.")
+            logging.info(f"Agent {self.agent_id}: Query executed successfully, {len(results)} rows returned.")
             return results
         except sqlite3.Error as e:
-            logging.error(f"Error executing SQL query: {e}", exc_info=True)
+            logging.error(f"Agent {self.agent_id}: Error executing SQL query: {e}", exc_info=True)
             return f"Error executing query: {e}"
-        except Exception as e:  # Catch other potential errors
+        except Exception as e:
             logging.error(
-                f"An unexpected error occurred during query execution: {e}",
+                f"Agent {self.agent_id}: An unexpected error occurred during query execution: {e}",
                 exc_info=True,
             )
             return f"An unexpected error occurred: {e}"
-            
+
     def _generate_analysis(self, user_question: str, sql_query: str, query_results: Union[List[Tuple], str], llm: llm_interface.LlmType) -> str:
-        """Generates a natural language analysis of the query results via llm_interface."""
-        logging.info("Generating analysis for query results.")
-        history_context = self.conversation_history.get_formatted_history()
-        
-        # PREPARE analysis context string (if available)
+        """Generates analysis using instance history and the instance's cursor."""
+        if not self.is_initialized: return "Agent not initialized"
+        logging.info(f"Agent {self.agent_id} generating analysis for query results.")
+        history_context = self.conversation_history.get_formatted_history() # Use instance history
+
         analysis_context = "No detailed schema analysis available."
         if self.detailed_schema_analysis:
             analysis_context = "\nDetailed Schema Analysis:\n" + json.dumps(self.detailed_schema_analysis, indent=2) + "\n"
 
-        # Call the analysis generation function from the llm_interface module
-        # Pass the cursor for header extraction
+        # Pass the instance's cursor
         return llm_interface.generate_analysis(
              question=user_question,
              sql=sql_query,
@@ -328,39 +383,38 @@ class TextToSqlAgent:
              analysis=analysis_context,
              history=history_context,
              llm=llm,
-             cursor=self.cursor
+             cursor=self.cursor # Use the instance's cursor
         )
-            
+
     def process_query(self, user_question: str, model_name: str) -> Dict[str, Optional[str]]:
         """
-        Processes the user's question: validates, potentially clarifies,
-        generates/executes SQL, and returns analysis or response. Requires agent to be initialized.
+        Processes the user's question for this specific agent instance.
+        Uses the agent's conversation history and resources.
         """
-        # Check for initialization, including the query engine which is set by the manager
         if not self.is_initialized or not self.query_engine or not self.conn:
-            logging.error("Agent not initialized (or query engine missing). Cannot process query.")
+            logging.error(f"Agent {self.agent_id} not initialized. Cannot process query.")
             return {
                 "type": "error",
-                "message": "Agent is not ready. Please ensure data is loaded and indexed.",
+                "message": f"Agent {self.agent_id} is not ready.",
                 "sql_query": None,
             }
 
-        logging.info(f"Processing user query: '{user_question}'")
+        logging.info(f"Agent {self.agent_id} processing user query: '{user_question}' using model '{model_name}'")
 
-        # Get the appropriate LLM instance for this request
+        # Get LLM instance (cached within this agent instance)
         try:
-            llm = self._get_llm(model_name)
+            llm = self._get_llm(model_name) # Use the instance's LLM cache
             if not llm:
                 raise ValueError(f"Could not initialize LLM for model: {model_name}")
         except Exception as e:
-            logging.error(f"Failed to get LLM instance: {e}", exc_info=True)
+            logging.error(f"Agent {self.agent_id}: Failed to get LLM instance: {e}", exc_info=True)
             return {
                 "type": "error",
                 "message": f"Error initializing language model: {e}",
                 "sql_query": None,
             }
 
-        # --- Call agent methods that now use llm_interface --- 
+        # --- Call agent methods (using instance history, schema, etc.) ---
         validation_result = self._validate_question(user_question, llm)
         action = validation_result["action"]
         details = validation_result["details"]
@@ -368,296 +422,180 @@ class TextToSqlAgent:
         response = {"type": action, "message": None, "sql_query": None}
 
         if action == "DIRECT_ANSWER":
-            logging.info("Action: DIRECT_ANSWER")
+            logging.info(f"Agent {self.agent_id}: Action=DIRECT_ANSWER")
             response["message"] = details
-            self.conversation_history.add_interaction(
+            self.conversation_history.add_interaction( # Add to instance history
                 question=user_question, response_type="direct_answer", analysis=details
             )
 
         elif action == "CLARIFICATION_NEEDED":
-            logging.info("Action: CLARIFICATION_NEEDED")
+            logging.info(f"Agent {self.agent_id}: Action=CLARIFICATION_NEEDED")
             response["message"] = details
-            self.conversation_history.add_interaction(
+            self.conversation_history.add_interaction( # Add to instance history
                 question=user_question,
                 response_type="clarification_needed",
-                analysis=details,  # Store the clarification question asked
+                analysis=details,
             )
 
         elif action == "SQL_NEEDED":
-            logging.info("Action: SQL_NEEDED")
-            max_retries = 5
+            logging.info(f"Agent {self.agent_id}: Action=SQL_NEEDED")
+            max_retries = 3 # Reduced retries slightly
             last_error_message = "An unknown error occurred during SQL processing."
             final_sql_query = None
 
             for attempt in range(max_retries):
-                logging.info(f"SQL Generation/Execution Attempt {attempt + 1}/{max_retries}")
-                # Generate SQL query
+                logging.info(f"Agent {self.agent_id}: SQL Generation/Execution Attempt {attempt + 1}/{max_retries}")
+
                 sql_query, raw_llm_sql_response = self._generate_sql_query(
                     user_question, llm
                 )
-                final_sql_query = sql_query # Keep track of the last generated query
+                final_sql_query = sql_query
 
                 if not sql_query:
-                    logging.error(f"SQL generation failed on attempt {attempt + 1}.")
-                    last_error_message = raw_llm_sql_response if raw_llm_sql_response else "I encountered an error trying to generate the SQL query needed to answer your question."
+                    logging.error(f"Agent {self.agent_id}: SQL generation failed on attempt {attempt + 1}.")
+                    last_error_message = raw_llm_sql_response if raw_llm_sql_response else "Error generating SQL query."
                     response["type"] = "error"
                     response["message"] = last_error_message
-                    self.conversation_history.add_interaction(
+                    self.conversation_history.add_interaction( # Add to instance history
                         question=user_question,
                         response_type="error",
                         analysis=last_error_message,
                     )
-                    break # Exit loop if generation failed
+                    break # Exit loop
 
-                # Execute SQL query
                 query_results = self._execute_sql_query(sql_query)
 
-                if isinstance(query_results, str): # Execution failed, result is error string
+                if isinstance(query_results, str): # Execution failed
                     error_message = query_results
-                    logging.warning(f"SQL execution failed on attempt {attempt + 1}: {error_message}. Generating analysis before retrying.")
-                    
-                    # --- START ANALYSIS OF EXECUTION ERROR ---
-                    # Generate analysis of the error to potentially guide the next attempt
+                    logging.warning(f"Agent {self.agent_id}: SQL execution failed on attempt {attempt + 1}: {error_message}.")
+
+                    # Generate analysis of the error for retry context
                     error_analysis_feedback = self._generate_analysis(
                         user_question, sql_query, error_message, llm
                     )
-                    logging.info(f"Analysis of execution error: {error_analysis_feedback}")
-                    
-                    # Prepare context for the next LLM generation attempt using the analysis
-                    retry_context = f"The previous SQL query (`{sql_query}`) failed to execute. Analysis of the error suggests: '{error_analysis_feedback}'. Please generate a revised SQL query based on this analysis."
-                    last_error_message = f"SQL Execution Error Analysis: {error_analysis_feedback}" # Update last error for final message if needed
-                    
-                    # Add analysis context to history for the next generation attempt
+                    logging.info(f"Agent {self.agent_id}: Analysis of execution error: {error_analysis_feedback}")
+
+                    retry_context = f"The previous SQL query (`{sql_query}`) failed. Analysis: '{error_analysis_feedback}'. Generate a revised SQL query."
+                    last_error_message = f"SQL Execution Error Analysis: {error_analysis_feedback}"
+
+                    # Add error analysis context to this agent's history for the next attempt
                     self.conversation_history.add_interaction(
-                        question=f"System: Analyzing execution error from attempt {attempt + 1}", # Internal note
-                        response_type="system_error_analysis_context", # New type for clarity
-                        sql_query=sql_query, # Log the failed query
-                        analysis=retry_context # Provide analysis and instruction for retry
+                        question=f"System: Analyzing execution error from attempt {attempt + 1}",
+                        response_type="system_error_analysis_context",
+                        sql_query=sql_query,
+                        analysis=retry_context
                     )
-                    # --- END ANALYSIS OF EXECUTION ERROR ---
 
                     if attempt == max_retries - 1:
-                        logging.error(f"SQL query failed after {max_retries} attempts. Last error analysis: {error_analysis_feedback}")
-                        # Use the analysis feedback in the final error message
-                        final_error_message = f"Failed to execute SQL query after {max_retries} attempts. Analysis of the last error: '{error_analysis_feedback}'. Last SQL: {sql_query}"
+                        logging.error(f"Agent {self.agent_id}: SQL query failed after {max_retries} attempts. Last error analysis: {error_analysis_feedback}")
+                        final_error_message = f"Failed after {max_retries} attempts. Analysis: '{error_analysis_feedback}'. Last SQL: {sql_query}"
                         response["type"] = "error"
                         response["message"] = final_error_message
                         response["sql_query"] = sql_query
-                        # Update history with final failure
+                        # Update instance history with final failure
                         self.conversation_history.add_interaction(
                            question=user_question,
                            response_type="error",
                            sql_query=sql_query,
                            analysis=response["message"],
                         )
-                        break # Exit loop after final failure
+                        break
                     else:
-                        continue # Go to the next attempt with the analysis context added
+                        continue # Go to the next attempt
+
                 else: # Execution successful
-                    logging.info(f"SQL execution successful on attempt {attempt + 1}.")
+                    logging.info(f"Agent {self.agent_id}: SQL execution successful on attempt {attempt + 1}.")
+                    # Optional: Add NULL check retry logic here if needed, similar to before.
+                    # For simplicity, let's skip the automatic NULL check retry for now.
 
-                    # --- START NULL CHECK & ANALYSIS-DRIVEN RETRY ---
-                    should_retry_due_to_nulls = False
-                    null_analysis_feedback = ""
-                    if query_results and len(query_results) > 0: # Check if results exist
-                        num_columns = len(query_results[0]) if query_results else 0
-                        # Heuristic: Check if the last column is consistently None
-                        if num_columns > 0:
-                            last_col_index = num_columns - 1
-                            all_last_col_null = all(row[last_col_index] is None for row in query_results)
-
-                            if all_last_col_null:
-                                logging.warning(f"Detected potential issue: Last column is NULL for all {len(query_results)} rows. Generating analysis before retrying.")
-                                should_retry_due_to_nulls = True
-                                # Generate analysis of the NULL results to guide the next attempt
-                                null_analysis_feedback = self._generate_analysis(
-                                     user_question, sql_query, query_results, llm
-                                )
-                                logging.info(f"Analysis of NULL results: {null_analysis_feedback}")
-                                
-                                # Prepare context for the next LLM generation attempt
-                                retry_context = f"The previous SQL query (`{sql_query}`) executed but returned NULLs in the result's main column. Analysis suggests: '{null_analysis_feedback}'. Please generate a revised SQL query to address this issue."
-                                
-                                self.conversation_history.add_interaction(
-                                    question=f"System: Analyzing NULL results from attempt {attempt + 1}", # Internal note
-                                    response_type="system_null_analysis_context",
-                                    sql_query=sql_query,
-                                    results=str(query_results), # Log the null results
-                                    analysis=retry_context # Provide analysis and instruction for retry
-                                )
-                    
-                    if should_retry_due_to_nulls:
-                        if attempt == max_retries - 1:
-                             logging.error(f"Query still returned NULLs after {max_retries} attempts. Last SQL: {sql_query}")
-                             # Use the last analysis feedback in the error message
-                             final_error_message = f"Failed to get valid results after {max_retries} attempts. The last query produced NULL values. Analysis of the issue: '{null_analysis_feedback}'. Last SQL: {sql_query}"
-                             response["type"] = "error"
-                             response["message"] = final_error_message
-                             response["sql_query"] = sql_query
-                             # Update history with final failure
-                             self.conversation_history.add_interaction(
-                                question=user_question,
-                                response_type="error",
-                                sql_query=sql_query,
-                                analysis=response["message"],
-                             )
-                             break # Exit loop after final failure
-                        else:
-                             continue # Go to the next attempt with the analysis context added
-                    # --- END NULL CHECK & ANALYSIS-DRIVEN RETRY ---
-
-                    # If no NULL issue detected OR if a retry was successful (not handled here, handled by loop break),
-                    # generate the final user-facing analysis.
-                    # Note: If should_retry_due_to_nulls was true, we 'continue'd, so this part only runs
-                    # when the results are deemed okay on the current attempt.
                     final_analysis = self._generate_analysis(
                         user_question, sql_query, query_results, llm
                     )
                     response["type"] = "sql_analysis"
                     response["message"] = final_analysis
                     response["sql_query"] = sql_query
-                    self.conversation_history.add_interaction(
+                    self.conversation_history.add_interaction( # Add to instance history
                         question=user_question,
                         response_type="sql_analysis",
                         sql_query=sql_query,
-                        results=str(query_results),
+                        results=str(query_results), # Consider truncating results for history
                         analysis=final_analysis,
                     )
                     break # Exit loop on success
 
-            # This 'else' block for the 'for' loop executes if the loop completed without a 'break'
-            # This means all retries failed, and the final state is already set in the last iteration's 'if attempt == max_retries - 1' block.
-            # However, we need to handle the case where SQL generation failed on the *first* try and broke the loop.
-            # The 'response' dict should already be populated correctly in that case too.
-            # If the loop finished normally (all retries failed), 'response' is already set with the error.
-            # If the loop broke due to success, 'response' is set with the analysis.
-            # If the loop broke due to generation failure, 'response' is set with the generation error.
-            # So, no explicit 'else' block needed here to set the response. We just ensure the final query is added if it hasn't been.
-            if response.get("sql_query") is None:
-                 response["sql_query"] = final_sql_query # Add the last attempted SQL query if not already set
+            # Ensure final query is added if it exists and isn't already set
+            if response.get("sql_query") is None and final_sql_query:
+                 response["sql_query"] = final_sql_query
 
-        else:  # Should not happen based on validation logic
-            logging.error(f"Invalid action '{action}' received from validation.")
+        else: # Should not happen
+            logging.error(f"Agent {self.agent_id}: Invalid action '{action}' from validation.")
             response["type"] = "error"
-            response["message"] = "An unexpected internal error occurred during question validation."
-            self.conversation_history.add_interaction(
+            response["message"] = "Internal error during validation."
+            self.conversation_history.add_interaction( # Add to instance history
                 question=user_question,
                 response_type="error",
                 analysis=response["message"],
             )
 
-        logging.info(f"Finished processing query. Response type: {response['type']}")
+        logging.info(f"Agent {self.agent_id}: Finished processing query. Response type: {response['type']}")
         return response
-        
-    def _get_llm(self, model_name: str) -> Optional[llm_interface.LlmType]:
-        """Gets an initialized LLM instance, caching it if necessary."""
+
+    def _get_llm(self, model_name: str) -> Optional[Union[OpenAI, genai.GenerativeModel]]:
+        """Gets an initialized LLM instance for THIS agent, caching it if necessary."""
         if model_name in self.initialized_llms:
-            logging.debug(f"Using cached LLM instance for: {model_name}")
+            logging.debug(f"Agent {self.agent_id}: Using cached LLM instance for: {model_name}")
             return self.initialized_llms[model_name]
 
-        logging.info(f"Initializing LLM for: {model_name}")
-        llm_instance: Optional[llm_interface.LlmType] = None # Use type alias
+        logging.info(f"Agent {self.agent_id}: Initializing LLM for: {model_name}")
+        llm_instance: Optional[Union[OpenAI, genai.GenerativeModel]] = None
         try:
+            # Reuse logic from llm_interface or centralize LLM creation if preferred
             if model_name.startswith("gpt-"):
-                llm_instance = OpenAI(
-                    model=model_name,
-                    temperature=0.01,
-                    max_new_tokens=500,  # Consider adjusting based on model
-                    request_timeout=60,
-                )
-            elif (
-                model_name.startswith("models/gemini-")
-                or model_name == "gemini-2.5-pro-exp-03-25"
-            ):
-                if not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
-                    logging.error(
-                        "GOOGLE_APPLICATION_CREDENTIALS environment variable not set. Cannot initialize Gemini via ADC."
-                    )
-                    return None
-                gemini_model_id = model_name
-                if not gemini_model_id.startswith(
-                    "models/"
-                ) and not gemini_model_id.startswith("tunedModels/"):
-                    gemini_model_id = f"models/{gemini_model_id}"
-                    logging.info(
-                        f"Prepended 'models/' prefix. Using: {gemini_model_id}"
-                    )
-                llm_instance = Gemini(
-                    model_name=gemini_model_id,
-                    temperature=0.01,
-                )
+                 if not os.environ.get("OPENAI_API_KEY"):
+                      logging.error(f"Agent {self.agent_id}: OpenAI API key missing for {model_name}.")
+                      return None
+                 llm_instance = OpenAI(
+                     model=model_name, temperature=0.01, max_new_tokens=500, request_timeout=60
+                 )
+            elif model_name.startswith("gemini-"):
+                # Check if genai is configured (key/ADC) - should be done globally now
+                # Rely on the genai library's internal configuration state
+                 try:
+                     llm_instance = genai.GenerativeModel(model_name)
+                 except Exception as gemini_e:
+                     logging.error(f"Agent {self.agent_id}: Failed to initialize Gemini model {model_name}: {gemini_e}", exc_info=True)
+                     return None # Return None if Gemini init fails
+
+                 # Check if API key / ADC seems available (optional check, library might handle)
+                 # if not os.getenv("GOOGLE_API_KEY") and not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+                 #    logging.warning(f"Agent {self.agent_id}: Google API Key/Credentials may be missing for {model_name}. Calls might fail.")
             else:
-                logging.error(f"Unsupported model name provided: {model_name}")
+                logging.error(f"Agent {self.agent_id}: Unsupported model name: {model_name}")
                 return None
 
             self.initialized_llms[model_name] = llm_instance
-            logging.info(f"Successfully initialized LLM for: {model_name}")
+            logging.info(f"Agent {self.agent_id}: Successfully initialized LLM for: {model_name}")
             return llm_instance
 
         except Exception as e:
-            logging.error(f"Error initializing LLM {model_name}: {e}", exc_info=True)
-            return None  # Failed to initialize
-            
-    def _print_vector_store_samples(self, num_samples=3):
-        """Prints sample documents from the vector store."""
-        # This might need adjustment if self.index is no longer directly accessible
-        # or if manager should provide this functionality.
-        # For now, let's assume self.index might be None if manager failed, 
-        # or we need to get the index from the manager if we didn't store it.
-        # Let's try getting it from the manager if we didn't store self.index
-        # Assuming self.query_engine exists implies self.index exists inside manager or was loaded.
-        # Let's refine this: We should probably store self.index from the manager's return value.
-        # EDIT: Ok, I'll add storing self.index back.
-        
-        # We need self.index to access docstore. Let's get it from query_engine.
-        if not self.query_engine or not hasattr(self.query_engine, 'retriever') or not hasattr(self.query_engine.retriever, '_index'):
-             # This access pattern might change with LlamaIndex versions
-             # A safer approach might be storing self.index alongside self.query_engine
-             logging.warning("Cannot access index/docstore via query engine for printing samples.")
-             return
-             
-        index = self.query_engine.retriever._index # Accessing internal attribute, potentially fragile
+            logging.error(f"Agent {self.agent_id}: Error initializing LLM {model_name}: {e}", exc_info=True)
+            return None
 
-        if not index or not index.docstore:
-            logging.warning(
-                "Vector store index/docstore not initialized or empty. Cannot print samples."
-            )
-            return
-
-        logging.debug("\n" + "=" * 80)
-        logging.debug("VECTOR STORE SAMPLES:")
-        logging.debug("=" * 80)
-        try:
-            documents = list(index.docstore.docs.values())
-            if not documents:
-                logging.debug("No documents found in the vector store.")
-                return
-
-            for i, doc in enumerate(documents[:num_samples]):
-                logging.debug(f"\nSample Document {i+1}:")
-                logging.debug("-" * 40)
-                logging.debug(doc.text)
-                logging.debug("-" * 40)
-
-            logging.debug("\n" + "=" * 80 + "\n")
-        except Exception as e:
-            logging.error(f"Error accessing vector store documents: {e}", exc_info=True)
-            
     def shutdown(self):
-        """Closes DB connection and resets state."""
-        logging.info("Shutting down agent resources...")
+        """Closes DB connection for this agent instance."""
+        logging.info(f"Shutting down agent instance {self.agent_id} resources...")
         if self.conn:
-            self.conn.close()
-            self.conn = None
+            try:
+                self.conn.close()
+                logging.info(f"Closed DB connection for agent {self.agent_id}.")
+            except Exception as e:
+                logging.error(f"Error closing DB connection for agent {self.agent_id}: {e}")
+        self.conn = None
         self.cursor = None
-        # self.index = None # Now managed by vector_store_manager
-        self.query_engine = None
-        self.initialized_llms = {}
-        self.embed_model = None
-        self.full_schema = ""
-        # self.vector_store_manager = None # Reset manager? Maybe not necessary if stateless
+        self.initialized_llms = {} # Clear instance LLM cache
+        # Don't nullify shared resources like query_engine, embed_model here
         self.is_initialized = False
-        logging.info("Agent resources released.")
+        logging.info(f"Agent instance {self.agent_id} resources released.")
 
 
 # Note: The main execution block (`if __name__ == "__main__":`)

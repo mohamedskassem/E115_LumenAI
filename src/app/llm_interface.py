@@ -2,17 +2,21 @@ import logging
 import sqlite3
 from typing import Dict, Tuple, List, Union, Optional
 
+import google.generativeai as genai # NEW IMPORT
+
 # LlamaIndex components needed for type hints and prompt templating
 from llama_index.core import PromptTemplate
 from llama_index.llms.openai import OpenAI # Assuming OpenAI or compatible interface
-from llama_index.llms.gemini import Gemini # For type hinting Union
+# from llama_index.llms.gemini import Gemini # REMOVED
 
 # Define the type alias for the LLM instance
-LlmType = Union[OpenAI, Gemini]
+LlmType = Union[OpenAI, genai.GenerativeModel] # UPDATED
 
 # --- Prompt Templates ---
+# Note: These are now standard Python strings, not LlamaIndex PromptTemplate objects
+# We will format them manually before sending to the LLM.
 
-VALIDATION_PROMPT_TEMPLATE = PromptTemplate(template="""
+VALIDATION_PROMPT_TEMPLATE_STR = """
 You are an AI assistant helping determine how to answer a user's question based on available database schema, detailed column analysis, and conversation history.
 
 Database Schema Summary:
@@ -52,9 +56,9 @@ OUTPUT: DIRECT_ANSWER: The database contains tables like: [List a few table name
 
 Now, analyze the current user question.
 
-OUTPUT:""")
+OUTPUT:"""
 
-SQL_GENERATION_PROMPT_TEMPLATE = PromptTemplate(template="""
+SQL_GENERATION_PROMPT_TEMPLATE_STR = """
 You are an expert SQL generator. You will be provided with a user query, database schema, detailed schema analysis, conversation history, and retrieved context.
 Your goal is to generate a single, valid SQL query (compatible with SQLite) to provide the best answer to the user's most recent question.
 Use the detailed schema analysis to better understand column meanings and relationships.
@@ -91,9 +95,9 @@ ORDER BY TotalQuantity DESC
 LIMIT 3;
 
 USER INPUT: {question}
-GENERATED SQL:""")
+GENERATED SQL:"""
 
-ANALYSIS_PROMPT_TEMPLATE = PromptTemplate(template="""
+ANALYSIS_PROMPT_TEMPLATE_STR = """
 You are LumenAI, a helpful data analyst AI. Your goal is to provide a clear, concise, and natural language response to the user's question based on the executed SQL query, its results, the database schema, and detailed schema analysis. Incorporate context from the conversation history if relevant.
 
 Database Schema:
@@ -130,21 +134,83 @@ Example (Handling Error):
 "There was an error when trying to run the query: [Error message]. This might be due to an issue with the generated SQL. Would you like me to try rephrasing the query?"
 
 Now, generate the analysis for the user:
-""")
+"""
+
+# --- NEW --- Prompt for generating chat title --- NEW ---
+CHAT_TITLE_PROMPT_TEMPLATE_STR = """
+Based on the user's first question, generate a very short, concise title (3-5 words maximum) for this chat session. The title should summarize the main topic or entity the user is asking about.
+
+User's First Question: "{question}"
+
+Examples:
+Question: "What were the total sales in the North region last quarter?"
+Title: North Region Sales Q3
+
+Question: "Show me the top 5 employees by hours worked."
+Title: Top Employee Hours
+
+Question: "List all products in the 'Electronics' category."
+Title: Electronics Products List
+
+Question: "hello"
+Title: General Chat
+
+Concise Title:
+"""
+
+# --- Helper Function for LLM Calls ---
+def _call_llm(llm: LlmType, prompt: str) -> str:
+    """Calls the appropriate method based on LLM type and returns the text response."""
+    response_text = ""
+    try:
+        if isinstance(llm, OpenAI):
+            # Use LlamaIndex OpenAI predict method (pass string directly)
+            response = llm.predict(prompt)
+            response_text = response.strip()
+        elif isinstance(llm, genai.GenerativeModel):
+            # Use google-generativeai generate_content
+            response = llm.generate_content(prompt)
+            # Basic error/block checking (could be more robust)
+            if response.parts:
+                response_text = response.text.strip()
+            else:
+                logging.warning(f"GenAI response was blocked or empty. Feedback: {response.prompt_feedback}")
+                # Consider throwing an error or returning a specific marker
+                # For now, return empty string, let calling function handle
+                response_text = "(LLM response blocked or empty)"
+        else:
+            raise TypeError(f"Unsupported LLM type: {type(llm)}")
+
+        logging.debug(f"LLM ({type(llm)}) Raw Response Snippet: {response_text[:100]}...")
+        return response_text
+    except Exception as e:
+        # Log the error with the specific LLM type
+        logging.error(f"Error during LLM call with {type(llm)}: {e}", exc_info=True)
+        # Re-raise or return an error indicator string
+        # Returning an error string for now
+        return f"(Error during LLM call: {e})"
 
 # --- LLM Task Functions ---
 
 def validate_question(question: str, schema: str, analysis: str, history: str, llm: LlmType) -> Dict[str, str]:
     """Uses LLM to validate the user question against schema, analysis, and history."""
     try:
-        # Pass template and kwargs directly to predict
-        response = llm.predict(
-            VALIDATION_PROMPT_TEMPLATE, 
-            schema=schema, 
+        # Format the prompt string manually
+        prompt = VALIDATION_PROMPT_TEMPLATE_STR.format(
+            schema=schema,
             analysis=analysis,
-            history=history, 
+            history=history,
             question=question
-        ).strip()
+        )
+        # Use the helper function for the LLM call
+        response = _call_llm(llm, prompt)
+
+        # Check if LLM call itself returned an error string
+        if response.startswith("(Error") or response.startswith("(LLM response blocked"):
+            logging.error(f"LLM call failed during validation: {response}")
+            # Fallback to SQL_NEEDED on error/block
+            return {"action": "SQL_NEEDED", "details": f"LLM Error: {response}"}
+
         logging.debug(f"Validation LLM response: {response}")
 
         parts = response.split(":", 1)
@@ -155,7 +221,8 @@ def validate_question(question: str, schema: str, analysis: str, history: str, l
             return {"action": action, "details": details}
         else:
             logging.warning(f"Unexpected validation response format: {response}. Defaulting to SQL_NEEDED.")
-            return {"action": "SQL_NEEDED", "details": ""}
+            # Include the unexpected response in details for debugging
+            return {"action": "SQL_NEEDED", "details": f"Unexpected format: {response}"}
     except Exception as e:
         logging.error(f"Error during question validation LLM call: {e}", exc_info=True)
         # Fallback in case of API error
@@ -164,16 +231,24 @@ def validate_question(question: str, schema: str, analysis: str, history: str, l
 def generate_sql(question: str, schema: str, analysis: str, history: str, context: str, llm: LlmType) -> Tuple[Optional[str], str]:
     """Generates SQL query using the LLM based on context, schema, analysis, and history."""
     try:
-        # Pass template and kwargs directly to predict
-        logging.info(f"Attempting SQL generation using LLM type: {type(llm)}")
-        response = llm.predict(
-            SQL_GENERATION_PROMPT_TEMPLATE, 
-            schema=schema, 
+        # Format the prompt string manually
+        prompt = SQL_GENERATION_PROMPT_TEMPLATE_STR.format(
+            schema=schema,
             analysis=analysis,
-            history=history, 
-            context=context, 
+            history=history,
+            context=context,
             question=question
-        ).strip()
+        )
+        logging.info(f"Attempting SQL generation using LLM type: {type(llm)}")
+
+        # Use the helper function for the LLM call
+        response = _call_llm(llm, prompt)
+
+        # Check if LLM call itself returned an error string
+        if response.startswith("(Error") or response.startswith("(LLM response blocked"):
+            logging.error(f"LLM call failed during SQL generation: {response}")
+            return None, f"LLM Error: {response}"
+
         logging.info(f"Completed SQL generation using LLM type: {type(llm)}")
         logging.debug(f"SQL Generation LLM response: {response}")
 
@@ -194,7 +269,9 @@ def generate_sql(question: str, schema: str, analysis: str, history: str, contex
 
     except Exception as e:
         logging.error(f"Error during SQL generation LLM call with {type(llm)}: {e}", exc_info=True)
-        return None, f"Error generating SQL: {e}"
+
+        # Return the exception string captured by the main try-except
+        return None, f"Unhandled Exception during SQL generation: {e}"
 
 def generate_analysis(question: str, sql: str, query_results: Union[List[Tuple], str], schema: str, analysis: str, history: str, llm: LlmType, cursor: Optional[sqlite3.Cursor]) -> str:
     """Generates natural language analysis of query results using LLM."""
@@ -219,19 +296,54 @@ def generate_analysis(question: str, sql: str, query_results: Union[List[Tuple],
         formatted_results = results_str
 
     try:
-        # Pass template and kwargs directly to predict
-        analysis_response = llm.predict(
-            ANALYSIS_PROMPT_TEMPLATE, 
+        # Format the prompt string manually
+        prompt = ANALYSIS_PROMPT_TEMPLATE_STR.format(
             schema=schema,
             analysis=analysis,
-            history=history, 
-            question=question, 
-            sql=sql, 
+            history=history,
+            question=question,
+            sql=sql,
             results=formatted_results
-        ).strip()
+        )
+
+        # Use the helper function for the LLM call
+        analysis_response = _call_llm(llm, prompt)
+
+        # Check if LLM call itself returned an error string
+        if analysis_response.startswith("(Error") or analysis_response.startswith("(LLM response blocked"):
+            logging.error(f"LLM call failed during analysis generation: {analysis_response}")
+            # Return the error message itself as the analysis
+            return f"LLM Error: {analysis_response}"
+
         logging.info("Analysis generated successfully.")
         logging.debug(f"Generated Analysis: {analysis_response}")
         return analysis_response
     except Exception as e:
         logging.error(f"Error during analysis generation LLM call: {e}", exc_info=True)
-        return f"Error generating analysis: {e}" 
+        return f"Unhandled Exception during analysis generation: {e}"
+
+# --- NEW Function for Chat Title Generation ---
+def generate_chat_title(question: str, llm: LlmType) -> Optional[str]:
+    """Generates a concise chat title based on the user's first question."""
+    try:
+        prompt = CHAT_TITLE_PROMPT_TEMPLATE_STR.format(question=question)
+        title = _call_llm(llm, prompt)
+
+        # Basic validation: check for errors/blocks and ensure not empty
+        if title.startswith("(Error") or title.startswith("(LLM response blocked") or not title:
+            logging.warning(f"Failed to generate valid chat title. LLM Response: {title}")
+            return None # Indicate failure
+
+        # Optional: Further cleanup (e.g., remove quotes if LLM adds them)
+        title = title.strip('"\' ') 
+        # --- NEW: Specifically remove the prompt prefix ---
+        prefix_to_remove = "Concise Title:"
+        if title.startswith(prefix_to_remove):
+            title = title[len(prefix_to_remove):].strip()
+        # --- END NEW ---
+        logging.info(f"Generated chat title: '{title}'")
+        return title
+
+    except Exception as e:
+        logging.error(f"Error during chat title generation: {e}", exc_info=True)
+        return None # Indicate failure 
