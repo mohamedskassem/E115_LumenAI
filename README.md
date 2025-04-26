@@ -77,7 +77,7 @@ graph LR
         C -- Execute SQL --> F[(SQLite DB)];
     end
 
-    subgraph Shared Components Initialization (on data load)
+    subgraph Shared Components Initialization
         D[Data Handler - data_handler.py] -- Generates/Loads --> SHARED;
         J[Vector Store Mgr - vector_store.py] -- Builds/Loads --> SHARED;
         D -- Uses --> G[OpenAI GPT-4 Turbo for Analysis];
