@@ -65,7 +65,7 @@ graph LR
 
     subgraph Backend State Management
         B -- Manages --> AGENTS{"Active Agents (Dict[chat_id, TextToSqlAgent])"};
-        B -- Manages --> SHARED[Shared Data Components (Index, Embeddings, Schema Analysis)];
+        B -- Manages --> SHARED["Shared Data Components (Index, Embeddings, Schema Analysis)"];
     end
 
     B -- Route request based on chat_id --> C(Specific TextToSqlAgent Instance - app.py);
