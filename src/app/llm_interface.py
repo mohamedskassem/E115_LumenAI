@@ -2,22 +2,24 @@ import logging
 import sqlite3
 from typing import Dict, Tuple, List, Union, Optional
 
-import google.generativeai as genai # NEW IMPORT
+import google.generativeai as genai  # NEW IMPORT
 
 # LlamaIndex components needed for type hints and prompt templating
-from llama_index.core import PromptTemplate
-from llama_index.llms.openai import OpenAI # Assuming OpenAI or compatible interface
+# from llama_index.core import PromptTemplate # F401 Unused
+from llama_index.llms.openai import OpenAI  # Assuming OpenAI or compatible interface
+
 # from llama_index.llms.gemini import Gemini # REMOVED
 
 # Define the type alias for the LLM instance
-LlmType = Union[OpenAI, genai.GenerativeModel] # UPDATED
+LlmType = Union[OpenAI, genai.GenerativeModel]  # UPDATED
 
 # --- Prompt Templates ---
 # Note: These are now standard Python strings, not LlamaIndex PromptTemplate objects
 # We will format them manually before sending to the LLM.
 
 VALIDATION_PROMPT_TEMPLATE_STR = """
-You are an AI assistant helping determine how to answer a user's question based on available database schema, detailed column analysis, and conversation history.
+You are an AI assistant helping determine how to answer a user's question based on available database schema, \
+detailled column analysis, and conversation history.
 
 Database Schema Summary:
 {schema}
@@ -30,13 +32,19 @@ Conversation History:
 
 User Question: "{question}"
 
-Analyze the user question in the context of the schema, the detailed analysis, and history. Determine ONE of the following actions:
+Analyze the user question in the context of the schema, the detailed analysis, and history. \
+Determine ONE of the following actions:
 
 1.  **SQL_NEEDED**: The question requires querying the database.
-2.  **DIRECT_ANSWER**: The question can be answered directly using the provided schema summary, detailed analysis, conversation history, or general knowledge (e.g., it's a greeting or a question about the AI itself). If choosing this, provide the direct answer.
-3.  **CLARIFICATION_NEEDED**: The question is ambiguous, lacks specifics needed for a query (e.g., needs date ranges, specific IDs), or refers to information clearly not in the schema, analysis or history. If choosing this, suggest what clarification is needed.
+2.  **DIRECT_ANSWER**: The question can be answered directly using the provided schema summary, detailed analysis, \
+conversation history, or general knowledge (e.g., it's a greeting or a question about the AI itself). \
+If choosing this, provide the direct answer.
+3.  **CLARIFICATION_NEEDED**: The question is ambiguous, lacks specifics needed for a query (e.g., needs date ranges, \
+specific IDs), or refers to information clearly not in the schema, analysis or history. \
+If choosing this, suggest what clarification is needed.
 
-Respond ONLY with the chosen action label (SQL_NEEDED, DIRECT_ANSWER, or CLARIFICATION_NEEDED) followed by a colon and the answer/clarification if applicable.
+Respond ONLY with the chosen action label (SQL_NEEDED, DIRECT_ANSWER, or CLARIFICATION_NEEDED) followed by a colon \
+and the answer/clarification if applicable.
 
 Examples:
 User Question: "What are the total sales for product ID 5?"
@@ -46,10 +54,12 @@ User Question: "Hello there!"
 OUTPUT: DIRECT_ANSWER: Hello! How can I help you with the data today?
 
 User Question: "Show me the recent orders."
-OUTPUT: CLARIFICATION_NEEDED: Could you please specify what you mean by 'recent'? For example, provide a date range (like 'last month' or 'since January 1st, 2024').
+OUTPUT: CLARIFICATION_NEEDED: Could you please specify what you mean by 'recent'? \
+For example, provide a date range (like 'last month' or 'since January 1st, 2024').
 
 User Question: "Can you tell me about the company CEO?"
-OUTPUT: DIRECT_ANSWER: I can only answer questions about the data described in the provided schema and analysis. I don't have information about the company's personnel like the CEO.
+OUTPUT: DIRECT_ANSWER: I can only answer questions about the data described in the provided schema and analysis. \
+I don't have information about the company's personnel like the CEO.
 
 User Question: "What tables do we have?"
 OUTPUT: DIRECT_ANSWER: The database contains tables like: [List a few table names from the schema].
@@ -59,8 +69,10 @@ Now, analyze the current user question.
 OUTPUT:"""
 
 SQL_GENERATION_PROMPT_TEMPLATE_STR = """
-You are an expert SQL generator. You will be provided with a user query, database schema, detailed schema analysis, conversation history, and retrieved context.
-Your goal is to generate a single, valid SQL query (compatible with SQLite) to provide the best answer to the user's most recent question.
+You are an expert SQL generator. You will be provided with a user query, database schema, \
+detailed schema analysis, conversation history, and retrieved context.
+Your goal is to generate a single, valid SQL query (compatible with SQLite) to provide the best answer \
+to the user's most recent question.
 Use the detailed schema analysis to better understand column meanings and relationships.
 
 Database Schema:
@@ -77,13 +89,15 @@ Retrieved Context (Information potentially relevant to the user query):
 
 Based on all the above, generate ONLY the SQL query for the following user input.
 - Do not include explanations or 'OUTPUT:'. Just the SQL.
-- For questions asking for the "top N", "highest", "lowest", "most", or "least", use ORDER BY with DESC or ASC and LIMIT N.
+- For questions asking for the "top N", "highest", "lowest", "most", or "least", \
+use ORDER BY with DESC or ASC and LIMIT N.
 
 Examples:
 
 -- Simple Query --
 USER INPUT: Show me the total revenue for each region for sales made in 2024.
-GENERATED SQL: SELECT Region, SUM(Quantity * Price) AS TotalRevenue FROM Sales WHERE Date BETWEEN '2024-01-01' AND '2024-12-31' GROUP BY Region;
+GENERATED SQL: SELECT Region, SUM(Quantity * Price) AS TotalRevenue \
+FROM Sales WHERE Date BETWEEN '2024-01-01' AND '2024-12-31' GROUP BY Region;
 
 -- Complex Query (Top N) --
 USER INPUT: What are the top 3 products with the most sales quantity in 2023?
@@ -98,7 +112,9 @@ USER INPUT: {question}
 GENERATED SQL:"""
 
 ANALYSIS_PROMPT_TEMPLATE_STR = """
-You are LumenAI, a helpful data analyst AI. Your goal is to provide a clear, concise, and natural language response to the user's question based on the executed SQL query, its results, the database schema, and detailed schema analysis. Incorporate context from the conversation history if relevant.
+You are LumenAI, a helpful data analyst AI. Your goal is to provide a clear, concise, and natural language response \
+to the user's question based on the executed SQL query, its results, the database schema, and detailed schema analysis. \
+Incorporate context from the conversation history if relevant.
 
 Database Schema:
 {schema}
@@ -117,21 +133,28 @@ Most Recent Interaction:
 
 Guidelines for your response:
 1.  **Directly Address the Question**: Start by answering the user's original question based on the results.
-2.  **Summarize Key Findings**: Briefly explain what the data shows, potentially using insights from the schema analysis (e.g., explaining what a column represents based on its analysis).
-3.  **Format Clearly**: Use formatting (like lists or bolding) if it improves readability. Format numbers understandably (e.g., use commas).
-4.  **Contextualize (If Applicable)**: If the conversation history provides relevant context (e.g., comparing to a previous query), mention it briefly (e.g., "Compared to last month...", "This is an increase from...").
-5.  **Handle Errors/No Results Gracefully**: If the results indicate an error or are empty, state that clearly and perhaps suggest alternatives or checking the query.
+2.  **Summarize Key Findings**: Briefly explain what the data shows, potentially using insights from the schema analysis \
+(e.g., explaining what a column represents based on its analysis).
+3.  **Format Clearly**: Use formatting (like lists or bolding) if it improves readability. \
+Format numbers understandably (e.g., use commas).
+4.  **Contextualize (If Applicable)**: If the conversation history provides relevant context \
+(e.g., comparing to a previous query), mention it briefly (e.g., "Compared to last month...", \
+"This is an increase from...").
+5.  **Handle Errors/No Results Gracefully**: If the results indicate an error or are empty, state that clearly \
+and perhaps suggest alternatives or checking the query.
 6.  **Be Concise**: Keep the analysis focused and avoid unnecessary jargon.
 7.  **Conversational Tone**: Maintain a helpful and professional yet conversational style.
 
 Example (Good Analysis):
-"Based on the data, the total sales revenue (sum of 'SalesAmount') for the 'Bikes' category in 2023 amounted to $1,234,567. This represents a 15% increase compared to the $1,073,536 in sales for 2022."
+"Based on the data, the total sales revenue (sum of 'SalesAmount') for the 'Bikes' category in 2023 amounted \
+to $1,234,567. This represents a 15% increase compared to the $1,073,536 in sales for 2022."
 
 Example (Handling No Results):
 "The query didn't find any sales records for Product ID 999 in the specified date range."
 
 Example (Handling Error):
-"There was an error when trying to run the query: [Error message]. This might be due to an issue with the generated SQL. Would you like me to try rephrasing the query?"
+"There was an error when trying to run the query: [Error message]. This might be due to an issue \
+with the generated SQL. Would you like me to try rephrasing the query?"
 
 Now, generate the analysis for the user:
 """
@@ -158,6 +181,7 @@ Title: General Chat
 Concise Title:
 """
 
+
 # --- Helper Function for LLM Calls ---
 def _call_llm(llm: LlmType, prompt: str) -> str:
     """Calls the appropriate method based on LLM type and returns the text response."""
@@ -174,14 +198,18 @@ def _call_llm(llm: LlmType, prompt: str) -> str:
             if response.parts:
                 response_text = response.text.strip()
             else:
-                logging.warning(f"GenAI response was blocked or empty. Feedback: {response.prompt_feedback}")
+                logging.warning(
+                    f"GenAI response was blocked or empty. Feedback: {response.prompt_feedback}"
+                )
                 # Consider throwing an error or returning a specific marker
                 # For now, return empty string, let calling function handle
                 response_text = "(LLM response blocked or empty)"
         else:
             raise TypeError(f"Unsupported LLM type: {type(llm)}")
 
-        logging.debug(f"LLM ({type(llm)}) Raw Response Snippet: {response_text[:100]}...")
+        logging.debug(
+            f"LLM ({type(llm)}) Raw Response Snippet: {response_text[:100]}..."
+        )
         return response_text
     except Exception as e:
         # Log the error with the specific LLM type
@@ -190,23 +218,26 @@ def _call_llm(llm: LlmType, prompt: str) -> str:
         # Returning an error string for now
         return f"(Error during LLM call: {e})"
 
+
 # --- LLM Task Functions ---
 
-def validate_question(question: str, schema: str, analysis: str, history: str, llm: LlmType) -> Dict[str, str]:
+
+def validate_question(
+    question: str, schema: str, analysis: str, history: str, llm: LlmType
+) -> Dict[str, str]:
     """Uses LLM to validate the user question against schema, analysis, and history."""
     try:
         # Format the prompt string manually
         prompt = VALIDATION_PROMPT_TEMPLATE_STR.format(
-            schema=schema,
-            analysis=analysis,
-            history=history,
-            question=question
+            schema=schema, analysis=analysis, history=history, question=question
         )
         # Use the helper function for the LLM call
         response = _call_llm(llm, prompt)
 
         # Check if LLM call itself returned an error string
-        if response.startswith("(Error") or response.startswith("(LLM response blocked"):
+        if response.startswith("(Error") or response.startswith(
+            "(LLM response blocked"
+        ):
             logging.error(f"LLM call failed during validation: {response}")
             # Fallback to SQL_NEEDED on error/block
             return {"action": "SQL_NEEDED", "details": f"LLM Error: {response}"}
@@ -220,15 +251,20 @@ def validate_question(question: str, schema: str, analysis: str, history: str, l
         if action in ["SQL_NEEDED", "DIRECT_ANSWER", "CLARIFICATION_NEEDED"]:
             return {"action": action, "details": details}
         else:
-            logging.warning(f"Unexpected validation response format: {response}. Defaulting to SQL_NEEDED.")
+            logging.warning(
+                f"Unexpected validation response format: {response}. Defaulting to SQL_NEEDED."
+            )
             # Include the unexpected response in details for debugging
             return {"action": "SQL_NEEDED", "details": f"Unexpected format: {response}"}
     except Exception as e:
         logging.error(f"Error during question validation LLM call: {e}", exc_info=True)
         # Fallback in case of API error
-        return {"action": "SQL_NEEDED", "details": ""} # Default to SQL needed on error
+        return {"action": "SQL_NEEDED", "details": ""}  # Default to SQL needed on error
 
-def generate_sql(question: str, schema: str, analysis: str, history: str, context: str, llm: LlmType) -> Tuple[Optional[str], str]:
+
+def generate_sql(
+    question: str, schema: str, analysis: str, history: str, context: str, llm: LlmType
+) -> Tuple[Optional[str], str]:
     """Generates SQL query using the LLM based on context, schema, analysis, and history."""
     try:
         # Format the prompt string manually
@@ -237,7 +273,7 @@ def generate_sql(question: str, schema: str, analysis: str, history: str, contex
             analysis=analysis,
             history=history,
             context=context,
-            question=question
+            question=question,
         )
         logging.info(f"Attempting SQL generation using LLM type: {type(llm)}")
 
@@ -245,7 +281,9 @@ def generate_sql(question: str, schema: str, analysis: str, history: str, contex
         response = _call_llm(llm, prompt)
 
         # Check if LLM call itself returned an error string
-        if response.startswith("(Error") or response.startswith("(LLM response blocked"):
+        if response.startswith("(Error") or response.startswith(
+            "(LLM response blocked"
+        ):
             logging.error(f"LLM call failed during SQL generation: {response}")
             return None, f"LLM Error: {response}"
 
@@ -261,21 +299,33 @@ def generate_sql(question: str, schema: str, analysis: str, history: str, contex
         final_sql = final_sql.strip().rstrip(";")
 
         logging.info(f"Generated SQL: {final_sql}")
-        if not final_sql: # Handle case where LLM returns empty string
-             logging.warning("SQL generation resulted in an empty string.")
-             return None, "LLM returned an empty SQL query."
-             
-        return final_sql, response # Return cleaned SQL and raw response
+        if not final_sql:  # Handle case where LLM returns empty string
+            logging.warning("SQL generation resulted in an empty string.")
+            return None, "LLM returned an empty SQL query."
+
+        return final_sql, response  # Return cleaned SQL and raw response
 
     except Exception as e:
-        logging.error(f"Error during SQL generation LLM call with {type(llm)}: {e}", exc_info=True)
+        logging.error(
+            f"Error during SQL generation LLM call with {type(llm)}: {e}", exc_info=True
+        )
 
         # Return the exception string captured by the main try-except
         return None, f"Unhandled Exception during SQL generation: {e}"
 
-def generate_analysis(question: str, sql: str, query_results: Union[List[Tuple], str], schema: str, analysis: str, history: str, llm: LlmType, cursor: Optional[sqlite3.Cursor]) -> str:
+
+def generate_analysis(
+    question: str,
+    sql: str,
+    query_results: Union[List[Tuple], str],
+    schema: str,
+    analysis: str,
+    history: str,
+    llm: LlmType,
+    cursor: Optional[sqlite3.Cursor],
+) -> str:
     """Generates natural language analysis of query results using LLM."""
-    
+
     # Format results nicely for the prompt
     formatted_results: str
     if isinstance(query_results, str):  # Error message from execution
@@ -287,31 +337,35 @@ def generate_analysis(question: str, sql: str, query_results: Union[List[Tuple],
         headers = []
         if cursor and cursor.description:
             headers = [desc[0] for desc in cursor.description]
-        
+
         results_str = "Headers: " + ", ".join(headers) + "\n" if headers else ""
         # Limit rows shown in prompt for brevity
-        results_str += "\n".join([str(row) for row in query_results[:20]]) 
+        results_str += "\n".join([str(row) for row in query_results[:20]])
         if len(query_results) > 20:
             results_str += f"\n... (truncated, {len(query_results)} total rows)"
         formatted_results = results_str
 
     try:
         # Format the prompt string manually
-        prompt = ANALYSIS_PROMPT_TEMPLATE_STR.format(
+        prompt = ANALYSIS_PROMPT_TEMPLATE_STR.format(  # noqa: E501
             schema=schema,
             analysis=analysis,
             history=history,
             question=question,
             sql=sql,
-            results=formatted_results
+            results=formatted_results,
         )
 
         # Use the helper function for the LLM call
         analysis_response = _call_llm(llm, prompt)
 
         # Check if LLM call itself returned an error string
-        if analysis_response.startswith("(Error") or analysis_response.startswith("(LLM response blocked"):
-            logging.error(f"LLM call failed during analysis generation: {analysis_response}")
+        if analysis_response.startswith("(Error") or analysis_response.startswith(
+            "(LLM response blocked"
+        ):
+            logging.error(
+                f"LLM call failed during analysis generation: {analysis_response}"  # noqa: E501
+            )
             # Return the error message itself as the analysis
             return f"LLM Error: {analysis_response}"
 
@@ -322,6 +376,7 @@ def generate_analysis(question: str, sql: str, query_results: Union[List[Tuple],
         logging.error(f"Error during analysis generation LLM call: {e}", exc_info=True)
         return f"Unhandled Exception during analysis generation: {e}"
 
+
 # --- NEW Function for Chat Title Generation ---
 def generate_chat_title(question: str, llm: LlmType) -> Optional[str]:
     """Generates a concise chat title based on the user's first question."""
@@ -330,20 +385,29 @@ def generate_chat_title(question: str, llm: LlmType) -> Optional[str]:
         title = _call_llm(llm, prompt)
 
         # Basic validation: check for errors/blocks and ensure not empty
-        if title.startswith("(Error") or title.startswith("(LLM response blocked") or not title:
-            logging.warning(f"Failed to generate valid chat title. LLM Response: {title}")
-            return None # Indicate failure
+        if (
+            title.startswith("(Error")
+            or title.startswith("(LLM response blocked")
+            or not title
+        ):
+            logging.warning(
+                f"Failed to generate valid chat title. LLM Response: {title}"
+            )
+            return None  # Indicate failure
 
         # Optional: Further cleanup (e.g., remove quotes if LLM adds them)
-        title = title.strip('"\' ') 
+        title = title.strip('"\' ')
         # --- NEW: Specifically remove the prompt prefix ---
         prefix_to_remove = "Concise Title:"
         if title.startswith(prefix_to_remove):
             title = title[len(prefix_to_remove):].strip()
+        # --- END NEW ---
+        # --- NEW: Strip quotes again after potential prefix removal ---
+        title = title.strip('"\' ')
         # --- END NEW ---
         logging.info(f"Generated chat title: '{title}'")
         return title
 
     except Exception as e:
         logging.error(f"Error during chat title generation: {e}", exc_info=True)
-        return None # Indicate failure 
+        return None  # Indicate failure

@@ -1,0 +1,5 @@
+[flake8]
+max-line-length = 120
+extend-ignore = 
+    # E501, # Line too long (handled by max-line-length)
+    # W503, # Line break before binary operator (often okay with black formatter) 

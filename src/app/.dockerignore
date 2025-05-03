@@ -1,3 +1,7 @@
+# Ignore virtual environment managed by pipenv
+.venv/
+
+# Ignore Python cache files
 __pycache__/
 *.pyc
 *.pyo
@@ -16,3 +20,33 @@ secrets/
 
 # Exclude Pipfile.lock if managing dependencies outside the container build
 # Pipfile.lock 
+
+# Ignore OS-specific files
+.DS_Store
+Thumbs.db
+
+# Ignore IDE/editor directories
+.vscode/
+.idea/
+
+# Ignore test files/directories (if they were inside src/app)
+# tests/
+
+# Ignore local secrets (should be mounted or managed by orchestrator)
+secrets/
+
+# Ignore local cache directories
+vector_store_cache/
+schema_analysis_cache/
+
+# Ignore local output/database files
+output/
+*.db
+*.db-journal
+
+# Ignore local uploads
+uploads/
+
+# Git files
+.git/
+.gitignore 

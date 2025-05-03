@@ -19,3 +19,9 @@ typing-extensions = "*"
 llama-index-embeddings-openai = "*"
 flasgger = "*"
 google-generativeai = "*"
+
+[dev-packages]
+pytest = "*"
+pytest-cov = "*"
+flake8 = "*"
+black = "*"

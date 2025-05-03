@@ -11,6 +11,7 @@ from llama_index.core import (
 from llama_index.core.base.embeddings.base import BaseEmbedding
 from llama_index.core.base.base_query_engine import BaseQueryEngine
 
+
 class VectorStoreManager:
     """Manages the loading, building, and persistence of the VectorStoreIndex."""
 
@@ -21,19 +22,23 @@ class VectorStoreManager:
             persist_dir: The directory path where the index is stored or will be stored.
         """
         self.persist_dir = persist_dir
-        logging.info(f"VectorStoreManager initialized with persist_dir: {self.persist_dir}")
+        logging.info(
+            f"VectorStoreManager initialized with persist_dir: {self.persist_dir}"
+        )
 
     def _is_cache_valid(self) -> bool:
         """Checks if the persistence directory exists and contains key index files."""
         if not os.path.exists(self.persist_dir):
             return False
-        
+
         # Check for the presence of essential index files
         # Add more checks if necessary based on the LlamaIndex version and storage backend
-        docstore_path = os.path.join(self.persist_dir, 'docstore.json') 
+        docstore_path = os.path.join(self.persist_dir, "docstore.json")
         if not os.path.exists(docstore_path):
-             logging.warning(f"Cache directory '{self.persist_dir}' exists, but key file '{docstore_path}' is missing.")
-             return False
+            logging.warning(
+                f"Cache directory '{self.persist_dir}' exists, but key file '{docstore_path}' is missing."
+            )
+            return False
 
         logging.info(f"Found valid cache directory and key file: {docstore_path}")
         return True
@@ -54,11 +59,13 @@ class VectorStoreManager:
             logging.error("Cannot build index: embed_model not provided.")
             return None
         if not schema_docs:
-             logging.warning("Cannot build index: No schema documents provided.")
-             return None
+            logging.warning("Cannot build index: No schema documents provided.")
+            return None
 
         try:
-            logging.info(f"Building new vector store index with {len(schema_docs)} documents...")
+            logging.info(
+                f"Building new vector store index with {len(schema_docs)} documents..."
+            )
             index = VectorStoreIndex.from_documents(
                 schema_docs, embed_model=embed_model
             )
@@ -69,12 +76,17 @@ class VectorStoreManager:
             logging.info("Vector Store Index built and persisted successfully.")
             return index
         except Exception as e:
-            logging.error(f"Error building/persisting Vector Store Index in {self.persist_dir}: {e}", exc_info=True)
+            logging.error(
+                f"Error building/persisting Vector Store Index in {self.persist_dir}: {e}",
+                exc_info=True,
+            )
             return None
 
     def load_or_build_index(
-        self, schema_docs: List[Document], embed_model: BaseEmbedding,
-        force_rebuild: bool = False
+        self,
+        schema_docs: List[Document],
+        embed_model: BaseEmbedding,
+        force_rebuild: bool = False,
     ) -> Tuple[Optional[VectorStoreIndex], Optional[BaseQueryEngine]]:
         """Loads the index from cache if valid, otherwise builds and persists a new one.
 
@@ -84,7 +96,7 @@ class VectorStoreManager:
             force_rebuild: If True, ignore existing cache and force rebuild.
 
         Returns:
-            A tuple containing the VectorStoreIndex and the QueryEngine, 
+            A tuple containing the VectorStoreIndex and the QueryEngine,
             or (None, None) if initialization fails.
         """
         index: Optional[VectorStoreIndex] = None
@@ -94,34 +106,51 @@ class VectorStoreManager:
         if not force_rebuild and self._is_cache_valid():
             try:
                 if not embed_model:
-                     logging.error("Embed model not provided. Cannot load index from cache.")
-                     return None, None
-                logging.info(f"Loading existing vector store index from: {self.persist_dir}")
-                storage_context = StorageContext.from_defaults(persist_dir=self.persist_dir)
-                index = load_index_from_storage(storage_context, embed_model=embed_model)
+                    logging.error(
+                        "Embed model not provided. Cannot load index from cache."
+                    )
+                    return None, None
+                logging.info(
+                    f"Loading existing vector store index from: {self.persist_dir}"
+                )
+                storage_context = StorageContext.from_defaults(
+                    persist_dir=self.persist_dir
+                )
+                index = load_index_from_storage(
+                    storage_context, embed_model=embed_model
+                )
                 logging.info("Vector Store Index loaded successfully from cache.")
             except Exception as e:
-                logging.error(f"Error loading index from cache {self.persist_dir}: {e}. Attempting rebuild.", exc_info=True)
+                logging.error(
+                    f"Error loading index from cache {self.persist_dir}: {e}. Attempting rebuild.",
+                    exc_info=True,
+                )
                 index = self._build_and_persist_index(schema_docs, embed_model)
         else:
             # Cache not valid, doesn't exist, or force_rebuild is True
             if force_rebuild:
-                logging.info(f"Force rebuild requested. Building new index in {self.persist_dir}...")
+                logging.info(
+                    f"Force rebuild requested. Building new index in {self.persist_dir}..."
+                )
             else:
-                logging.info(f"Vector store cache not found or invalid in {self.persist_dir}. Building new index...")
+                logging.info(
+                    f"Vector store cache not found or invalid in {self.persist_dir}. Building new index..."
+                )
             index = self._build_and_persist_index(schema_docs, embed_model)
 
         # If index was successfully loaded or built, create query engine
         if index:
             try:
-                 # Configure query engine to only retrieve context
-                 query_engine = index.as_query_engine(response_mode="no_text")
-                 logging.info("Query engine created successfully.")
+                # Configure query engine to only retrieve context
+                query_engine = index.as_query_engine(response_mode="no_text")
+                logging.info("Query engine created successfully.")
             except Exception as e:
-                 logging.error(f"Error creating query engine from index: {e}", exc_info=True)
-                 index = None # Nullify index if query engine creation fails
-                 query_engine = None
+                logging.error(
+                    f"Error creating query engine from index: {e}", exc_info=True
+                )
+                index = None  # Nullify index if query engine creation fails
+                query_engine = None
         else:
             logging.error("Index initialization failed (either loading or building).")
 
-        return index, query_engine 
+        return index, query_engine

@@ -2,13 +2,15 @@ FROM python:3.9-slim
 
 WORKDIR /app
 
-# Copy Pipfile and Pipfile.lock first to leverage Docker cache.
-COPY Pipfile Pipfile.lock ./
+# Copy only the requirements file first to leverage Docker cache
+COPY requirements.txt ./
 
-# Install pipenv and then install dependencies into the system environment.
-RUN pip install pipenv && pipenv install --system
+# Install dependencies from requirements.txt
+# --no-cache-dir reduces layer size, --upgrade pip ensures latest pip
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of your application code.
+# Copy the rest of your application code (respecting .dockerignore)
 COPY . .
 
 # Expose port 5000 for the Flask app

@@ -1,0 +1,59 @@
+name: Python CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python 3.9
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.9"
+
+    - name: Install pipenv
+      run: pip install pipenv
+
+    # Cache pipenv virtualenv based on Pipfile.lock hash
+    - name: Cache pipenv virtualenv
+      id: cache-pipenv
+      uses: actions/cache@v4
+      with:
+        path: ~/.local/share/virtualenvs
+        # Use hash of Pipfile.lock for cache key
+        # Use runner OS in key for cross-OS compatibility if needed
+        key: ${{ runner.os }}-pipenv-${{ hashFiles('**/Pipfile.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-pipenv-
+
+    # Install dependencies using pipenv
+    # Use --deploy for CI environments to ensure lockfile consistency
+    # Use sync for faster installs if lockfile is reliable
+    - name: Install dependencies
+      # Run only if cache wasn't restored or is outdated
+      # if: steps.cache-pipenv.outputs.cache-hit != 'true' # Optional optimization
+      # Need to cd into src/app where Pipfile is
+      working-directory: ./src/app
+      run: pipenv sync --dev
+
+    - name: Lint with flake8
+      # Need to cd into src/app for pipenv run to find env correctly
+      # Run flake8 from root to use .flake8 config and specify src/app path
+      working-directory: ./src/app
+      run: |
+        pipenv run flake8 ../../src/app --count --select=E9,F63,F7,F82 --show-source --statistics
+        pipenv run flake8 ../../src/app --count --exit-zero --max-complexity=10 --max-line-length=120 --statistics
+
+    - name: Test with pytest
+      # Need to cd into src/app for pipenv run to find env correctly
+      # Run pytest from root to use pytest.ini
+      working-directory: ./src/app
+      run: pipenv run pytest ../../tests 
