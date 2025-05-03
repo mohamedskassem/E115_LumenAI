@@ -291,11 +291,12 @@ def generate_sql(
         logging.debug(f"SQL Generation LLM response: {response}")
 
         # Basic validation/cleanup of the generated SQL
-        final_sql = response
+        final_sql = response.strip() # Strip whitespace first
         if final_sql.startswith("```sql"):
             final_sql = final_sql[len("```sql") :].strip()
         if final_sql.endswith("```"):
             final_sql = final_sql[: -len("```")].strip()
+        # Strip again and remove trailing semicolon
         final_sql = final_sql.strip().rstrip(";")
 
         logging.info(f"Generated SQL: {final_sql}")

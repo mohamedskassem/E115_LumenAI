@@ -338,8 +338,9 @@ class TextToSqlAgent:
                 f"Failed to establish DB connection for agent {self.agent_id}. Queries will fail."
             )
             self.is_initialized = False
-            return False
+            return False  # Explicitly return False here
 
+        # This part should only run if the connection was successful
         self.is_initialized = True
         logging.info(f"Agent instance {self.agent_id} initialized successfully.")
         return True
