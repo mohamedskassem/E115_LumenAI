@@ -23,22 +23,22 @@ jobs:
       run: pip install pipenv
 
     # Cache pipenv virtualenv based on Pipfile.lock hash
-    - name: Cache pipenv virtualenv
-      id: cache-pipenv
-      uses: actions/cache@v4
-      with:
-        path: ~/.local/share/virtualenvs
-        # Use hash of Pipfile.lock for cache key
-        # Use runner OS in key for cross-OS compatibility if needed
-        key: ${{ runner.os }}-pipenv-${{ hashFiles('**/Pipfile.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-pipenv-
+    # - name: Cache pipenv virtualenv
+    #   id: cache-pipenv
+    #   uses: actions/cache@v4
+    #   with:
+    #     path: ~/.local/share/virtualenvs
+    #     # Use hash of Pipfile.lock for cache key
+    #     # Use runner OS in key for cross-OS compatibility if needed
+    #     key: ${{ runner.os }}-pipenv-${{ hashFiles('**/Pipfile.lock') }}
+    #     restore-keys: |
+    #       ${{ runner.os }}-pipenv-
 
     # Install dependencies using pipenv
     # Use --deploy for CI environments to ensure lockfile consistency
     # Use sync for faster installs if lockfile is reliable
     - name: Install dependencies
-      # Run only if cache wasn't restored or is outdated
+      # Run only if cache wasn't restored or is outdated # <-- Commenting out cache logic
       # if: steps.cache-pipenv.outputs.cache-hit != 'true' # Optional optimization
       # Need to cd into src/app where Pipfile is
       working-directory: ./src/app
