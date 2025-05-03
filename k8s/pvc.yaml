@@ -1,0 +1,36 @@
+# k8s/pvc.yaml
+# Defines PersistentVolumeClaims to request storage for application data and caches.
+# This assumes a default StorageClass is available in your cluster.
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: app-output-pvc # Claim for the database directory
+spec:
+  accessModes:
+    - ReadWriteOnce # Can be mounted by a single node (typical for SQLite)
+  resources:
+    requests:
+      storage: 1Gi # Request 1 GiB of storage (adjust as needed)
+--- # Separator for the next resource
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: app-vector-cache-pvc # Claim for the vector store cache
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi # Vector stores can get larger, request more (adjust as needed)
+--- # Separator for the next resource
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: app-schema-cache-pvc # Claim for the schema analysis cache
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 500Mi # Schema cache likely smaller (adjust as needed) 

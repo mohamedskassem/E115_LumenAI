@@ -179,7 +179,14 @@ class TextToSqlAgent:
             logging.info(
                 "Initializing SHARED OpenAI Embeddings (text-embedding-3-small)..."
             )
-            embed_model = OpenAIEmbedding(model="text-embedding-3-small")
+            # Explicitly pass API key
+            openai_api_key = os.environ.get("OPENAI_API_KEY")
+            if not openai_api_key:
+                raise ValueError("OPENAI_API_KEY environment variable not found.")
+            embed_model = OpenAIEmbedding(
+                model="text-embedding-3-small",
+                api_key=openai_api_key
+            )
             if not embed_model:
                 raise ValueError("Shared Embedding model initialization failed.")
         except Exception as e:
@@ -195,11 +202,16 @@ class TextToSqlAgent:
             )
             # Use a temporary instance, don't cache it in the static method
             if schema_analysis_model_name.startswith("gpt-"):
-                if os.environ.get("OPENAI_API_KEY"):
-                    schema_analysis_llm = OpenAI(model=schema_analysis_model_name)
+                # Explicitly pass API key if found
+                openai_api_key = os.environ.get("OPENAI_API_KEY")
+                if openai_api_key:
+                    schema_analysis_llm = OpenAI(
+                        model=schema_analysis_model_name,
+                        api_key=openai_api_key
+                    )
                 else:
                     logging.warning(
-                        "OpenAI API Key not found, needed for schema analysis. "
+                        "OPENAI_API_KEY environment variable not found, needed for schema analysis. "
                         "Analysis will be basic."
                     )
             elif schema_analysis_model_name.startswith("gemini-"):

@@ -1,0 +1,19 @@
+# k8s/service.yaml
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: text-to-sql-app-service # Name for the service object
+  labels:
+    app: text-to-sql # Label for grouping/selecting resources
+spec:
+  selector:
+    app: text-to-sql # Selects Pods with this label (matches Deployment's pod template label)
+  ports:
+    - protocol: TCP
+      port: 80 # Port the Service will listen on (external/cluster view)
+      targetPort: 5000 # Port on the Pods (containerPort) the traffic is forwarded to
+  # Type LoadBalancer typically provisions an external IP on cloud providers.
+  # For local clusters (minikube, Docker Desktop), you might use NodePort
+  # or access via kubectl port-forward or minikube service.
+  type: LoadBalancer 

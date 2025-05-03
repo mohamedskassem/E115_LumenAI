@@ -26,6 +26,12 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r src/app/dev-requirements.txt
 
+    - name: List installed packages
+      run: pip list
+
+    - name: Show pytest-mock details
+      run: pip show pytest-mock
+
     - name: Lint with flake8
       run: |
         # Check for critical errors (Syntax, Undefined Names - excluding F824)
