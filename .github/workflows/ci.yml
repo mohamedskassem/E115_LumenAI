@@ -54,8 +54,28 @@ jobs:
         # Check for other style issues (ignore F824 again)
         pipenv run flake8 ../../src/app --count --exit-zero --max-complexity=10 --max-line-length=120 --statistics --extend-ignore=F824
 
-    - name: Test with pytest
+    - name: Test with pytest and Generate Coverage Report
       # Need to cd into src/app for pipenv run to find env correctly
       # Run pytest from root to use pytest.ini
       working-directory: ./src/app
-      run: pipenv run pytest ../../tests 
+      run: |
+        pipenv run pytest \
+          --cov=../../src/app \
+          --cov-report=xml \
+          --cov-report=term-missing \
+          --cov-fail-under=50 \
+          ../../tests
+
+    # Optional: Upload coverage reports to Codecov
+    # - name: Upload coverage reports to Codecov
+    #   uses: codecov/codecov-action@v4.0.1
+    #   with:
+    #     token: ${{ secrets.CODECOV_TOKEN }} # Create this secret in GitHub settings
+    #     # Optional: specify coverage file if not coverage.xml
+    #     # files: ./coverage.xml
+    #     # Optional: flags for categorizing coverage
+    #     # flags: unittests
+    #     # Optional: name for the commit
+    #     # name: codecov-umbrella
+    #     # Optional: fail if upload fails
+    #     # fail_ci_if_error: true 
