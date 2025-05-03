@@ -18,53 +18,29 @@ jobs:
       uses: actions/setup-python@v5
       with:
         python-version: "3.9"
+        cache: 'pip' # Enable caching for pip installs based on requirements file
+        cache-dependency-path: src/app/dev-requirements.txt
 
-    - name: Install pipenv
-      run: pip install pipenv
-
-    # Cache pipenv virtualenv based on Pipfile.lock hash
-    # - name: Cache pipenv virtualenv
-    #   id: cache-pipenv
-    #   uses: actions/cache@v4
-    #   with:
-    #     path: ~/.local/share/virtualenvs
-    #     # Use hash of Pipfile.lock for cache key
-    #     # Use runner OS in key for cross-OS compatibility if needed
-    #     key: ${{ runner.os }}-pipenv-${{ hashFiles('**/Pipfile.lock') }}
-    #     restore-keys: |
-    #       ${{ runner.os }}-pipenv-
-
-    # Install dependencies using pipenv
-    # Use --deploy for CI environments to ensure lockfile consistency
-    # Use sync for faster installs if lockfile is reliable
     - name: Install dependencies
-      # Run only if cache wasn't restored or is outdated # <-- Commenting out cache logic
-      # if: steps.cache-pipenv.outputs.cache-hit != 'true' # Optional optimization
-      # Need to cd into src/app where Pipfile is
-      working-directory: ./src/app
-      run: pipenv sync --dev
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r src/app/dev-requirements.txt
 
     - name: Lint with flake8
-      # Need to cd into src/app for pipenv run to find env correctly
-      # Run flake8 from root to use .flake8 config and specify src/app path
-      working-directory: ./src/app
       run: |
-        # Check for critical errors (Syntax, Undefined Names - excluding F824 for now)
-        pipenv run flake8 ../../src/app --count --select=E9,F63,F7 --show-source --statistics
+        # Check for critical errors (Syntax, Undefined Names - excluding F824)
+        python -m flake8 src/app --count --select=E9,F63,F7 --show-source --statistics
         # Check for other style issues (ignore F824 again)
-        pipenv run flake8 ../../src/app --count --exit-zero --max-complexity=10 --max-line-length=120 --statistics --extend-ignore=F824
+        python -m flake8 src/app --count --exit-zero --max-complexity=10 --max-line-length=120 --statistics --extend-ignore=F824
 
     - name: Test with pytest and Generate Coverage Report
-      # Need to cd into src/app for pipenv run to find env correctly
-      # Run pytest from root to use pytest.ini
-      working-directory: ./src/app
       run: |
-        pipenv run pytest \
-          --cov=../../src/app \
+        python -m pytest \
+          --cov=src/app \
           --cov-report=xml \
           --cov-report=term-missing \
           --cov-fail-under=70 \
-          ../../tests
+          tests
 
     # Optional: Upload coverage reports to Codecov
     # - name: Upload coverage reports to Codecov
