@@ -728,22 +728,40 @@ def test_load_and_index_data_db_not_exist(mock_exists):
     mock_exists.assert_called_once_with(db_path)
 
 @patch("src.app.app.os.path.exists", return_value=True)
+@patch("src.app.app.os.environ.get") # Also mock os.environ.get here
 @patch("src.app.app.OpenAIEmbedding", side_effect=Exception("Embedding init failed"))
-def test_load_and_index_data_embedding_fail(mock_embedding, mock_exists):
+def test_load_and_index_data_embedding_fail(mock_embedding, mock_os_environ_get, mock_exists):
     """Test failure during embedding model initialization."""
+    # Simulate key exists so the check passes, allowing the constructor to be called
+    mock_os_environ_get.return_value = "fake_key"
+
     result = TextToSqlAgent.load_and_index_data(db_path="dummy.db")
+
     assert result is None
+    mock_os_environ_get.assert_called_with("OPENAI_API_KEY")
+    # The constructor IS called, but raises the side_effect Exception
     mock_embedding.assert_called_once()
 
 @patch("src.app.app.os.path.exists", return_value=True)
 @patch("src.app.app.OpenAIEmbedding") # Mocks succeed
 @patch("src.app.app.OpenAI")
 @patch("src.app.app.data_handler.load_db_schema_and_analysis", return_value=(None, None, None)) # Simulate schema load failure
-def test_load_and_index_data_schema_load_fail(mock_load_db, mock_openai, mock_embedding, mock_exists):
+def test_load_and_index_data_schema_load_fail(
+    mock_load_db, mock_openai, mock_embedding, mock_exists, mocker # Add mocker
+):
     """Test failure during schema loading."""
+    # Mock env var check to succeed
+    mocker.patch.dict(os.environ, {"OPENAI_API_KEY": "fake_key"}, clear=True)
+    # Configure successful embedding mock return
+    mock_embedding.return_value = MagicMock()
+    mock_openai.return_value = MagicMock()
+
     result = TextToSqlAgent.load_and_index_data(db_path="dummy.db")
+
     assert result is None
-    mock_load_db.assert_called_once()
+    mock_embedding.assert_called_once() # Should be called
+    mock_openai.assert_called_once() # Should be called
+    mock_load_db.assert_called_once() # Called but returns None
 
 @patch("src.app.app.os.path.exists", return_value=True)
 @patch("src.app.app.OpenAIEmbedding")
@@ -751,9 +769,13 @@ def test_load_and_index_data_schema_load_fail(mock_load_db, mock_openai, mock_em
 @patch("src.app.app.data_handler.load_db_schema_and_analysis")
 @patch("src.app.app.VectorStoreManager")
 def test_load_and_index_data_vector_store_fail(
-    mock_vector_store_manager, mock_load_db, mock_openai, mock_embedding, mock_exists
+    mock_vector_store_manager, mock_load_db, mock_openai, mock_embedding, mock_exists,
+    mocker # Add mocker
 ):
     """Test failure during vector store initialization."""
+    # Mock env var check to succeed
+    mocker.patch.dict(os.environ, {"OPENAI_API_KEY": "fake_key"}, clear=True)
+
     # Mocks preceding steps succeed
     mock_embedding_instance = MagicMock()
     mock_embedding.return_value = mock_embedding_instance
