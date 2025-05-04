@@ -1,0 +1,86 @@
+# k8s/deployment.yaml
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: text-to-sql-app-deployment # Name for the deployment object
+  labels:
+    app: text-to-sql # Label for grouping/selecting resources
+spec:
+  replicas: 1 # Start with one replica (pod)
+  # Add rollout strategy
+  strategy:
+    type: Recreate # Terminate old pod before creating new one (needed for ReadWriteOnce PVCs)
+  selector:
+    matchLabels:
+      app: text-to-sql # Selects pods managed by this deployment
+  template: # Pod template
+    metadata:
+      labels:
+        app: text-to-sql # Pods get this label
+    spec:
+      containers:
+      - name: text-to-sql-container # Name of the container within the pod
+        # IMPORTANT: Replace with your actual image path in your container registry
+        image: {{ docker_image_full }}
+        imagePullPolicy: Always # Force pull on every pod creation/restart
+        ports:
+        - containerPort: 5000 # Port the Flask app listens on inside the container
+        env:
+          # Inject OPENAI_API_KEY from the Secret
+          - name: OPENAI_API_KEY
+            valueFrom:
+              secretKeyRef:
+                name: api-keys # Name of the Secret object
+                key: OPENAI_API_KEY # Key within the Secret data
+
+          # Inject GOOGLE_API_KEY from the Secret (If needed directly as env var)
+          # - name: GOOGLE_API_KEY
+          #   valueFrom:
+          #     secretKeyRef:
+          #       name: api-keys
+          #       key: GOOGLE_API_KEY
+
+          # Set GOOGLE_APPLICATION_CREDENTIALS path using the mounted secret file
+          - name: GOOGLE_APPLICATION_CREDENTIALS
+            value: /etc/secrets/google_api_key.json
+
+          # Other environment variables if needed (e.g., TOKENIZERS_PARALLELISM)
+          - name: TOKENIZERS_PARALLELISM
+            value: "false"
+
+        volumeMounts:
+          # Mount the PVC for the database output directory
+          - name: app-output-storage
+            mountPath: /app/output # Path inside the container
+          # Mount the PVC for the vector store cache
+          - name: app-vector-cache-storage
+            mountPath: /app/vector_store_cache
+          # Mount the PVC for the schema analysis cache
+          - name: app-schema-cache-storage
+            mountPath: /app/schema_analysis_cache
+          # Mount the Google JSON key from the secret as a file
+          - name: google-api-key-secret
+            mountPath: /etc/secrets # Mount directory
+            readOnly: true # Mount as read-only
+
+      volumes:
+        # Define the volume using the PVC for database output
+        - name: app-output-storage
+          persistentVolumeClaim:
+            claimName: app-output-pvc # Must match PVC metadata.name
+        # Define the volume using the PVC for vector store cache
+        - name: app-vector-cache-storage
+          persistentVolumeClaim:
+            claimName: app-vector-cache-pvc
+        # Define the volume using the PVC for schema analysis cache
+        - name: app-schema-cache-storage
+          persistentVolumeClaim:
+            claimName: app-schema-cache-pvc
+        # Define the volume using the Secret for the Google JSON key
+        - name: google-api-key-secret
+          secret:
+            secretName: api-keys # Name of the Secret object
+            items:
+              - key: google_api_key.json # Key in the Secret data
+                path: google_api_key.json # Filename inside the mountPath (/etc/secrets) 
