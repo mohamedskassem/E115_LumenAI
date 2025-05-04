@@ -317,7 +317,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // --- Chat List Management ---
-    function renderChatList(chats) { // Expects array of {chat_id, title}
+    function renderChatList(chats, selectedChatId = currentChatId) { // Default to global currentChatId
         chatList.innerHTML = ''; // Clear existing list
         if (!chats || chats.length === 0) {
             const noChatsItem = document.createElement('li');
@@ -330,40 +330,43 @@ document.addEventListener('DOMContentLoaded', () => {
 
         chats.forEach(chat => {
             const chatId = chat.chat_id;
-            // Use title from chat object (synced from server)
-            const displayName = chat.title || `Chat ${chatId.substring(0, 8)}...`;
-            const listItem = document.createElement('li');
-            listItem.dataset.chatId = chatId; // Ensure the LI has the ID for highlightSelectedChat
+            // Update local display name store if needed
+            const displayName = chatDisplayNames[chatId] || chat.title || `Chat ${chatId.substring(0, 8)}...`;
+            if (displayName !== "New Chat" && (!chatDisplayNames[chatId] || chatDisplayNames[chatId] === "New Chat")) {
+                 chatDisplayNames[chatId] = displayName;
+            }
 
-            // Add chat title span
+            const listItem = document.createElement('li');
+            listItem.dataset.chatId = chatId;
+
             const titleSpan = document.createElement('span');
             titleSpan.classList.add('chat-title');
             titleSpan.textContent = displayName;
             listItem.appendChild(titleSpan);
 
-            // Attach select listener to the title span
             titleSpan.addEventListener('click', () => {
                 selectChat(chatId);
             });
 
-            // Add delete icon
-            const deleteIcon = document.createElement('img'); // Create an img element
-            deleteIcon.src = "static/delete.svg"; // Set the source to your SVG file
-            deleteIcon.alt = "Delete Chat"; // Add alt text for accessibility
+            const deleteIcon = document.createElement('img');
+            deleteIcon.src = "static/delete.svg";
+            deleteIcon.alt = "Delete Chat";
             deleteIcon.classList.add('delete-chat-icon');
             deleteIcon.title = 'Delete Chat';
-            deleteIcon.dataset.chatId = chatId; // Assign chatId for the handler
+            deleteIcon.dataset.chatId = chatId;
             deleteIcon.addEventListener('click', (event) => {
-                event.stopPropagation(); // Prevent selectChat from firing
-                handleDeleteChat(chatId); // Call delete with specific ID
+                event.stopPropagation();
+                handleDeleteChat(chatId);
             });
             listItem.appendChild(deleteIcon);
-            if (chatId === currentChatId) {
+
+            // Highlight based on the passed selectedChatId (or the global currentChatId)
+            if (chatId === selectedChatId) {
                 listItem.classList.add('selected');
             }
+
             chatList.appendChild(listItem);
         });
-        // Delete icons handle their own state
     }
 
     function selectChat(chatId) {
@@ -670,6 +673,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // NEW: Function to initialize or restore chat session
     async function initializeChat() {
         console.log("[initializeChat] START");
+        let restoredSession = false; // Flag to track if we restored a session
         const storedChatId = sessionStorage.getItem('currentChatId');
         console.log("[initializeChat] Stored chat ID:", storedChatId);
 
@@ -678,12 +682,14 @@ document.addEventListener('DOMContentLoaded', () => {
         console.log("[initializeChat] Server Status:", serverStatus);
 
         if (serverStatus && serverStatus.is_data_loaded) {
-            // Update local maps with server data
+            // Update local maps with server data first
             chatDisplayNames = serverStatus.active_chats.reduce((acc, chat) => {
                 acc[chat.chat_id] = chat.title;
                 return acc;
             }, {});
-            renderChatList(serverStatus.active_chats); // Render full list
+            // Render the list BUT do not automatically select here
+            renderChatList(serverStatus.active_chats, null); // Pass null to avoid auto-selection in render
+            console.log("[initializeChat] Rendered chat list without auto-selection.");
 
             const activeChatIds = serverStatus.active_chats.map(c => c.chat_id);
 
@@ -691,21 +697,30 @@ document.addEventListener('DOMContentLoaded', () => {
             console.log(`[initializeChat] Decision Point: storedChatId='${storedChatId}', activeChatIds=${JSON.stringify(activeChatIds)}, includesStored=${activeChatIds.includes(storedChatId)}`);
             // --- End Debug Log --- 
 
-            // If a valid chat ID exists in sessionStorage for this tab, try to restore it
+            // Try to restore ONLY if a valid chat ID exists in sessionStorage
             if (storedChatId && activeChatIds.includes(storedChatId)) {
                 console.log(`[initializeChat] Decision: Restore session for chat ID: ${storedChatId}`);
-                await selectChat(storedChatId); // Select the stored chat
+                // Select chat *without* awaiting here, let UI update happen
+                selectChat(storedChatId); 
                 enableChatControls();
+                restoredSession = true;
             } else {
-                // If no valid ID in sessionStorage, ALWAYS create a new chat for this new session
-                console.log("[initializeChat] No valid stored chat ID. Creating new chat.");
+                // If no valid ID in sessionStorage, need to create a new one.
+                console.log("[initializeChat] Decision: No valid stored chat ID found.");
                 if (storedChatId) { 
                     console.log("[initializeChat] Removing invalid stored ID:", storedChatId);
                     sessionStorage.removeItem('currentChatId'); 
-                } // Clear invalid stored ID
-                await createNewChat(); // Create a new one
-                // enableChatControls() will be called by selectChat inside createNewChat
+                } 
+                // Set flag to create new chat AFTER this function finishes initial UI setup
+                // createNewChat(); // Don't call directly here
             }
+            
+            // If no session was restored, create a new one now
+            if (!restoredSession) {
+                console.log("[initializeChat] No session restored, proceeding to create new chat.");
+                await createNewChat(); // Now create the new chat
+            }
+
         } else {
             // Data not loaded on server
             console.log("Data not loaded on server.");
