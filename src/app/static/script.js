@@ -369,7 +369,17 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    function selectChat(chatId) {
+    // MODIFIED: selectChat - save to sessionStorage
+    async function selectChat(chatId) {
+        // --- ADD THIS CHECK --- 
+        // If the requested chat is already selected, do nothing further.
+        if (currentChatId === chatId) {
+            console.log(`[selectChat] Chat ${chatId} is already current. No action needed.`);
+            highlightSelectedChat(chatId); // Ensure highlight is correct just in case
+            return; 
+        }
+        // --- END ADDED CHECK --- 
+
         // Avoid redundant processing if already selected
         console.log(`[selectChat] Attempting to select chat: ${chatId}. Current: ${currentChatId}`);
         if (currentChatId === chatId && chatbox.children.length > 0 && (chatHistories[chatId]?.length > 0 || chatbox.querySelector('.message'))) {
