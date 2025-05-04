@@ -60,4 +60,63 @@ jobs:
     #     # Optional: name for the commit
     #     # name: codecov-umbrella
     #     # Optional: fail if upload fails
-    #     # fail_ci_if_error: true 
+    #     # fail_ci_if_error: true
+
+  deploy:
+    # Depends on the build job passing
+    needs: build
+    # Run only on pushes to the main branch
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: 'read'
+      id-token: 'write' # Needed for google-github-actions/auth
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: 'Authenticate to Google Cloud'
+      id: auth
+      uses: 'google-github-actions/auth@v2'
+      with:
+        credentials_json: '${{ secrets.GCP_SA_KEY }}'
+
+    - name: 'Set up Cloud SDK'
+      uses: 'google-github-actions/setup-gcloud@v2'
+
+    - name: 'Configure Docker for GAR'
+      run: gcloud auth configure-docker us-central1-docker.pkg.dev
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build and Push Docker image
+      id: docker_build
+      uses: docker/build-push-action@v5
+      with:
+        context: ./src/app # Build context is the app directory
+        file: ./src/app/Dockerfile
+        platforms: linux/amd64,linux/arm64
+        push: true
+        tags: us-central1-docker.pkg.dev/cs115-449919/lumen-ai-repo/text-to-sql-app:latest,us-central1-docker.pkg.dev/cs115-449919/lumen-ai-repo/text-to-sql-app:${{ github.sha }}
+        # Add cache settings if desired for faster builds later
+        # cache-from: type=gha
+        # cache-to: type=gha,mode=max
+
+    - name: Get GKE Credentials
+      run: |
+        gcloud container clusters get-credentials lumenai-cluster \
+          --project=cs115-449919 \
+          --region=us-central1
+
+    - name: Deploy to GKE
+      run: |
+        echo "Applying Kubernetes manifests..."
+        kubectl apply -f k8s/pvc.yaml
+        # Note: Don't apply secrets.yaml from repo, real secret is in cluster
+        kubectl apply -f k8s/deployment.yaml
+        kubectl apply -f k8s/service.yaml
+        echo "Waiting for deployment rollout..."
+        kubectl rollout status deployment/text-to-sql-app-deployment --timeout=5m 
