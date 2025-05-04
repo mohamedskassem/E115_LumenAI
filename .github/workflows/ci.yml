@@ -104,9 +104,9 @@ jobs:
         platforms: linux/amd64,linux/arm64
         push: true
         tags: us-central1-docker.pkg.dev/cs115-449919/lumen-ai-repo/text-to-sql-app:latest,us-central1-docker.pkg.dev/cs115-449919/lumen-ai-repo/text-to-sql-app:${{ github.sha }}
-        # Add cache settings if desired for faster builds later
-        # cache-from: type=gha
-        # cache-to: type=gha,mode=max
+        # Add cache settings using GitHub Actions cache
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
 
     - name: Get GKE Credentials
       run: |
