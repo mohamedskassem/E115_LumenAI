@@ -362,44 +362,52 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function selectChat(chatId) {
+        // Avoid redundant processing if already selected
+        console.log(`[selectChat] Attempting to select chat: ${chatId}. Current: ${currentChatId}`);
         if (currentChatId === chatId && chatbox.children.length > 0 && (chatHistories[chatId]?.length > 0 || chatbox.querySelector('.message'))) {
-            console.log(`Chat ${chatId} already selected.`);
-            highlightSelectedChat(chatId); // Ensure highlight is correct
-            return;
+             console.log(`[selectChat] Chat ${chatId} already selected and has content. Highlighting.`);
+             highlightSelectedChat(chatId); // Ensure highlight is correct
+             return;
         }
 
-        console.log(`Selecting chat: ${chatId}`);
+        console.log(`[selectChat] Selecting chat: ${chatId}`);
         currentChatId = chatId;
         sessionStorage.setItem('currentChatId', chatId); // Save selection
+        console.log(`[selectChat] Set currentChatId to ${currentChatId} and saved to sessionStorage.`);
         highlightSelectedChat(chatId);
 
         chatbox.innerHTML = ''; // Clear current messages
+        console.log(`[selectChat] Chatbox cleared for ${chatId}.`);
 
         // Retrieve history OR initialize if it doesn't exist locally yet
         const history = chatHistories[currentChatId] || [];
+        console.log(`[selectChat] Retrieved history for ${currentChatId}. Length: ${history.length}`);
         if (!chatHistories[currentChatId]) {
+             console.log(`[selectChat] Initializing local history array for ${currentChatId}.`);
              chatHistories[currentChatId] = history;
              // Assume it's a new chat if history is empty locally, mark for title gen
              // unless we already have a non-default display name
              if (!chatDisplayNames[currentChatId] || chatDisplayNames[currentChatId] === "New Chat") {
                  isFirstMessage[currentChatId] = true;
-                 console.log(`Marking chat ${currentChatId} for title generation.`);
+                 console.log(`[selectChat] Marking chat ${currentChatId} for title generation.`);
              }
         }
 
+        console.log(`[selectChat] Rendering ${history.length} messages for ${currentChatId}...`);
         history.forEach(msg => {
             addMessageToChatbox(msg.sender, msg.text, msg.type, msg.sql, false);
         });
+        console.log(`[selectChat] Finished rendering history for ${currentChatId}.`);
 
         if (history.length === 0) {
             const title = chatDisplayNames[currentChatId] || `Chat ${currentChatId.substring(0, 8)}...`;
+            console.log(`[selectChat] Adding initial info message for empty chat ${currentChatId}.`);
             addMessageToChatbox('bot', `Selected ${title}. Ask a question.`, 'info', null, false);
         }
-        
-        enableChatControls(); 
+
+        enableChatControls();
         userInput.focus();
-        // Delay scroll slightly to allow rendering
-        setTimeout(() => { chatbox.scrollTop = chatbox.scrollHeight; }, 0); 
+        setTimeout(() => { chatbox.scrollTop = chatbox.scrollHeight; }, 0);
     }
 
     function highlightSelectedChat(chatId) {
@@ -656,12 +664,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // NEW: Function to initialize or restore chat session
     async function initializeChat() {
-        console.log("Initializing chat...");
+        console.log("[initializeChat] START");
         const storedChatId = sessionStorage.getItem('currentChatId');
-        console.log("Stored chat ID:", storedChatId);
+        console.log("[initializeChat] Stored chat ID:", storedChatId);
 
         // Fetch current server state regardless
         const serverStatus = await fetchServerStatus();
+        console.log("[initializeChat] Server Status:", serverStatus);
 
         if (serverStatus && serverStatus.is_data_loaded) {
             // Update local maps with server data
@@ -675,13 +684,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
             // If a valid chat ID exists in sessionStorage for this tab, try to restore it
             if (storedChatId && activeChatIds.includes(storedChatId)) {
-                console.log(`Restoring session for chat ID: ${storedChatId}`);
+                console.log(`[initializeChat] Restoring session for chat ID: ${storedChatId}`);
                 await selectChat(storedChatId); // Select the stored chat
                 enableChatControls();
             } else {
                 // If no valid ID in sessionStorage, ALWAYS create a new chat for this new session
-                console.log("No valid stored chat ID found for this session, creating a new chat.");
-                if (storedChatId) { sessionStorage.removeItem('currentChatId'); } // Clear invalid stored ID
+                console.log("[initializeChat] No valid stored chat ID. Creating new chat.");
+                if (storedChatId) { 
+                    console.log("[initializeChat] Removing invalid stored ID:", storedChatId);
+                    sessionStorage.removeItem('currentChatId'); 
+                } // Clear invalid stored ID
                 await createNewChat(); // Create a new one
                 // enableChatControls() will be called by selectChat inside createNewChat
             }
@@ -701,7 +713,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // NEW: Function to explicitly create a new chat session
     async function createNewChat() {
-        console.log('Requesting new chat from server...');
+        console.log('[createNewChat] Requesting new chat from server...');
         newChatButton.disabled = true;
         toggleLoading(true);
         let newChatId = null;
@@ -715,19 +727,22 @@ document.addEventListener('DOMContentLoaded', () => {
             const data = await response.json();
             if (data.chat_id) {
                 newChatId = data.chat_id;
-                console.log('New chat created successfully:', newChatId);
+                console.log('[createNewChat] New chat created successfully:', newChatId);
 
                 // Update local state immediately
                 chatHistories[newChatId] = [];
                 chatDisplayNames[newChatId] = "New Chat";
                 isFirstMessage[newChatId] = true; // Mark for title generation
+                console.log('[createNewChat] Local state updated for:', newChatId);
 
                 // Re-render list and select
                 const chatListArray = Object.keys(chatDisplayNames).map(id => ({
                     chat_id: id,
                     title: chatDisplayNames[id]
                 }));
+                console.log('[createNewChat] Rendering chat list:', chatListArray);
                 renderChatList(chatListArray);
+                console.log('[createNewChat] Calling selectChat for:', newChatId);
                 await selectChat(newChatId); // Select the new chat
                 addMessageToChatbox('system', "New chat started. Ask a question!", 'info', null, false);
 
