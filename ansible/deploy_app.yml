@@ -8,7 +8,8 @@
     # Define variables for Kubernetes manifests path and image details
     k8s_manifest_dir: "../k8s" # Path relative to the playbook file
     # Use Jinja template default filter if var is not passed via --extra-vars
-    docker_image_tag: "{{ image_tag | default('latest') }}"
+    # Default to Git SHA if running in GitHub Actions, otherwise default to latest
+    docker_image_tag: "{{ image_tag | default(github.sha | default('latest')) }}"
     docker_image_repo: "us-central1-docker.pkg.dev/cs115-449919/lumen-ai-repo/text-to-sql-app"
     docker_image_full: "{{ docker_image_repo }}:{{ docker_image_tag }}"
 

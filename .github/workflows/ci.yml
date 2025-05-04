@@ -103,7 +103,10 @@ jobs:
         file: ./src/app/Dockerfile
         platforms: linux/amd64,linux/arm64
         push: true
-        tags: us-central1-docker.pkg.dev/cs115-449919/lumen-ai-repo/text-to-sql-app:latest,us-central1-docker.pkg.dev/cs115-449919/lumen-ai-repo/text-to-sql-app:${{ github.sha }}
+        # Prioritize SHA tag, also push latest
+        tags: |
+          us-central1-docker.pkg.dev/cs115-449919/lumen-ai-repo/text-to-sql-app:${{ github.sha }}
+          us-central1-docker.pkg.dev/cs115-449919/lumen-ai-repo/text-to-sql-app:latest
         # Add cache settings using GitHub Actions cache
         cache-from: type=gha
         cache-to: type=gha,mode=max
@@ -117,9 +120,14 @@ jobs:
     - name: Deploy to GKE
       run: |
         echo "Applying Kubernetes manifests..."
+        # Explicitly set the image in the deployment using the SHA tag
+        kubectl set image deployment/text-to-sql-app-deployment text-to-sql-container=us-central1-docker.pkg.dev/cs115-449919/lumen-ai-repo/text-to-sql-app:${{ github.sha }} --record
+        # Apply other manifests (PVCs might already exist, Service unlikely to change often)
         kubectl apply -f k8s/pvc.yaml
         # Note: Don't apply secrets.yaml from repo, real secret is in cluster
-        kubectl apply -f k8s/deployment.yaml
+        # Apply the rest of the deployment config (replicas, strategy etc.)
+        # kubectl apply -f k8s/deployment.yaml.j2 # Cannot apply Jinja template directly
+        # Apply the service config
         kubectl apply -f k8s/service.yaml
         echo "Waiting for deployment rollout..."
         kubectl rollout status deployment/text-to-sql-app-deployment --timeout=5m 
