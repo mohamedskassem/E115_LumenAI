@@ -23,11 +23,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // State variables
     let currentChatId = null;
-    let chatHistories = {}; // Store message history per chat { chatId: [messages...]} 
+    let chatHistories = {}; // Store message history per chat { chatId: [messages...] }
     let chatDisplayNames = {}; // Store display names { chatId: displayName }
+    let isFirstMessage = {}; // Track if the next message is the first for title gen {chatId: true/false}
 
     // Initial State Check
-    checkStatusAndLoadChats();
+    // Use sessionStorage to persist chat ID across refreshes within the same tab
+    initializeChat();
+    // checkStatusAndLoadChats(); // Called by initializeChat now
 
     // --- Event Listeners ---
     // Data Loader
@@ -64,28 +67,27 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (!question) return;
         if (!currentChatId) {
-             addMessageToChatbox('system', 'Please select or start a chat first.', 'error', null, false);
+             addMessageToChatbox('system', 'Error: No active chat selected. Please start a new chat.', 'error', null, false);
+             console.error("SendMessage called with no currentChatId");
              return;
         }
+
+        // Determine if title generation is needed
+        const generateTitle = !!isFirstMessage[currentChatId]; // True if flag is set
+        console.log(`Sending message for chat ${currentChatId}. Generate title: ${generateTitle}`);
 
         addMessageToChatbox('user', question, 'normal', null, true);
         userInput.value = '';
         autoGrowTextarea(); // Reset textarea height after sending
         toggleLoading(true);
 
-        // Check if we need to generate a title for this chat
-        console.log(`Checking title for [${currentChatId}]: current display name is '${chatDisplayNames[currentChatId]}'`); // Debug log
-        const needsTitle = chatDisplayNames[currentChatId] === "New Chat";
-
-        // --- Debugging Log ---
-        const requestBody = { 
-            question: question, 
-            model: selectedModel, 
-            chat_id: currentChatId, 
-            generate_title: needsTitle
+        const requestBody = {
+            question: question,
+            model: selectedModel,
+            chat_id: currentChatId,
+            generate_title: generateTitle
         };
         console.log('Sending /query with:', requestBody);
-        // --- End Debugging Log ---
 
         try {
             const response = await fetch('/query', {
@@ -93,7 +95,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 headers: {
                     'Content-Type': 'application/json',
                 },
-                body: JSON.stringify(requestBody), // Use the logged body
+                body: JSON.stringify(requestBody),
             });
 
             toggleLoading(false);
@@ -112,23 +114,25 @@ document.addEventListener('DOMContentLoaded', () => {
             addMessageToChatbox('bot', messageText, messageType, data.sql_query, true);
 
             // --- Update Chat Title in UI if Changed ---
-            const receivedChatId = currentChatId; // Chat ID for which response was received
+            const receivedChatId = currentChatId;
             const receivedTitle = data.chat_title;
 
-            // Check if the title actually changed AND the chat still exists locally
             if (receivedTitle && chatDisplayNames[receivedChatId] && chatDisplayNames[receivedChatId] !== receivedTitle) {
                 console.log(`Updating title for chat ${receivedChatId} from '${chatDisplayNames[receivedChatId]}' to '${receivedTitle}'`);
                 chatDisplayNames[receivedChatId] = receivedTitle; // Update local store
 
-                // Re-render the chat list using the updated display names
                 const chatListArray = Object.keys(chatDisplayNames).map(id => ({
                     chat_id: id,
                     title: chatDisplayNames[id]
                 }));
                 renderChatList(chatListArray);
-                // highlightSelectedChat(currentChatId); // Re-highlighting is handled by renderChatList now based on currentChatId
             }
-            // --- End Title Update ---
+
+            // Mark that the first message has been sent for this chat
+            if (generateTitle) {
+                isFirstMessage[currentChatId] = false;
+                console.log(`Title generation flag set to false for chat ${currentChatId}`);
+            }
 
         } catch (error) {
             console.error('Error sending message:', error);
@@ -245,13 +249,18 @@ document.addEventListener('DOMContentLoaded', () => {
                 throw new Error(data.error || `HTTP error! status: ${response.status}`);
             }
 
-            uploadStatus.textContent = data.message || "Upload successful! Initializing agent...";
+            uploadStatus.textContent = data.message || "Upload successful! Initializing...";
             uploadStatus.className = 'status-message success';
-            // Reset file input
-            csvUpload.value = ''; 
+            csvUpload.value = '';
             handleFileSelection();
-            // Switch UI
-            checkStatusAndLoadChats(); 
+
+            // Clear existing session state and initialize fresh after upload
+            currentChatId = null;
+            sessionStorage.removeItem('currentChatId');
+            chatHistories = {};
+            chatDisplayNames = {};
+            isFirstMessage = {};
+            await initializeChat(); // Re-initialize after successful upload
 
         } catch (error) {
             console.error('Error uploading files:', error);
@@ -286,12 +295,19 @@ document.addEventListener('DOMContentLoaded', () => {
             uploadStatus.className = 'status-message success';
             showDataLoader(); // Switch back to data loader UI
 
+            // Clear state and switch UI
+            currentChatId = null;
+            sessionStorage.removeItem('currentChatId');
+            chatHistories = {};
+            chatDisplayNames = {};
+            isFirstMessage = {};
+
         } catch (error) {
             console.error('Error removing data:', error);
             addMessageToChatbox('bot', `Error removing data: ${error.message}`, 'error', null, false);
         } finally {
              toggleLoading(false);
-             removeDataButton.disabled = false;
+             removeDataButton.disabled = true; // Technically disabled by disableChatControls
         }
     }
 
@@ -346,27 +362,38 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function selectChat(chatId) {
-        if (currentChatId === chatId && chatbox.children.length > 0 && chatHistories[chatId]?.length > 0) {
-            highlightSelectedChat(chatId);
+        if (currentChatId === chatId && chatbox.children.length > 0 && (chatHistories[chatId]?.length > 0 || chatbox.querySelector('.message'))) {
+            console.log(`Chat ${chatId} already selected.`);
+            highlightSelectedChat(chatId); // Ensure highlight is correct
             return;
         }
 
         console.log(`Selecting chat: ${chatId}`);
         currentChatId = chatId;
+        sessionStorage.setItem('currentChatId', chatId); // Save selection
         highlightSelectedChat(chatId);
 
         chatbox.innerHTML = ''; // Clear current messages
 
-        const history = chatHistories[chatId] || [];
+        // Retrieve history OR initialize if it doesn't exist locally yet
+        const history = chatHistories[currentChatId] || [];
+        if (!chatHistories[currentChatId]) {
+             chatHistories[currentChatId] = history;
+             // Assume it's a new chat if history is empty locally, mark for title gen
+             // unless we already have a non-default display name
+             if (!chatDisplayNames[currentChatId] || chatDisplayNames[currentChatId] === "New Chat") {
+                 isFirstMessage[currentChatId] = true;
+                 console.log(`Marking chat ${currentChatId} for title generation.`);
+             }
+        }
 
         history.forEach(msg => {
-             // Add message without saving it again to history
-             addMessageToChatbox(msg.sender, msg.text, msg.type, msg.sql, false); 
+            addMessageToChatbox(msg.sender, msg.text, msg.type, msg.sql, false);
         });
 
         if (history.length === 0) {
-            const title = chatDisplayNames[chatId] || `Chat ${chatId.substring(0, 8)}...`;
-            addMessageToChatbox('bot', `Selected ${title}. Ask a question about the loaded data.`, 'info', null, false);
+            const title = chatDisplayNames[currentChatId] || `Chat ${currentChatId.substring(0, 8)}...`;
+            addMessageToChatbox('bot', `Selected ${title}. Ask a question.`, 'info', null, false);
         }
         
         enableChatControls(); 
@@ -474,9 +501,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Remove from local stores (should already be gone from server)
                 delete chatHistories[chatIdToDelete];
                 delete chatDisplayNames[chatIdToDelete]; // Remove display name
+                delete isFirstMessage[chatIdToDelete];
                 // If the deleted chat was the current one, clear selection
                 if (currentChatId === chatIdToDelete) {
                     currentChatId = null;
+                    sessionStorage.removeItem('currentChatId');
                     chatbox.innerHTML = '';
                     disableChatControls(); // Go to a neutral state before reloading
                 }
@@ -565,6 +594,12 @@ document.addEventListener('DOMContentLoaded', () => {
             // Save unconditionally if the main 'if' condition passed
             history.push(messageToSave);
         }
+
+        // If this was the first *user* message, mark it so title gen flag isn't set next time
+        if(sender === 'user' && isFirstMessage[currentChatId]) {
+            console.log(`First user message saved for ${currentChatId}, setting isFirstMessage to false.`);
+            isFirstMessage[currentChatId] = false;
+        }
     }
 
     function enableChatControls() {
@@ -618,5 +653,132 @@ document.addEventListener('DOMContentLoaded', () => {
     // --- Initial Load ---
     checkStatusAndLoadChats();
     adjustTextareaHeight();
+
+    // NEW: Function to initialize or restore chat session
+    async function initializeChat() {
+        console.log("Initializing chat...");
+        const storedChatId = sessionStorage.getItem('currentChatId');
+        console.log("Stored chat ID:", storedChatId);
+
+        // Fetch current server state regardless
+        const serverStatus = await fetchServerStatus();
+
+        if (serverStatus && serverStatus.is_data_loaded) {
+            // Update local maps with server data
+            chatDisplayNames = serverStatus.active_chats.reduce((acc, chat) => {
+                acc[chat.chat_id] = chat.title;
+                return acc;
+            }, {});
+            renderChatList(serverStatus.active_chats); // Render full list
+
+            const activeChatIds = serverStatus.active_chats.map(c => c.chat_id);
+
+            // Validate storedChatId
+            if (storedChatId && activeChatIds.includes(storedChatId)) {
+                console.log(`Restoring session for chat ID: ${storedChatId}`);
+                await selectChat(storedChatId); // Select the stored chat
+                enableChatControls();
+            } else if (activeChatIds.length > 0) {
+                // If stored ID invalid/missing, but chats exist, select the first one
+                console.log(`Stored chat ID invalid or missing, selecting first available: ${activeChatIds[0]}`);
+                await selectChat(activeChatIds[0]); // Select the first available chat
+                enableChatControls();
+            } else {
+                // Data loaded, but no chats exist on server (e.g., after fresh load or delete all)
+                console.log("Data loaded, but no active chats found on server. Creating new chat.");
+                await createNewChat(); // Create a new one
+            }
+        } else {
+            // Data not loaded on server
+            console.log("Data not loaded on server.");
+            showDataLoader();
+            disableChatControls();
+            chatList.innerHTML = '';
+            currentChatId = null;
+            sessionStorage.removeItem('currentChatId');
+            chatDisplayNames = {};
+            chatHistories = {};
+            isFirstMessage = {};
+        }
+    }
+
+    // NEW: Function to explicitly create a new chat session
+    async function createNewChat() {
+        console.log('Requesting new chat from server...');
+        newChatButton.disabled = true;
+        toggleLoading(true);
+        let newChatId = null;
+
+        try {
+            const response = await fetch('/chats', { method: 'POST' });
+            if (!response.ok) {
+                const errData = await response.json().catch(() => ({}));
+                throw new Error(errData.error || `HTTP error! status: ${response.status}`);
+            }
+            const data = await response.json();
+            if (data.chat_id) {
+                newChatId = data.chat_id;
+                console.log('New chat created successfully:', newChatId);
+
+                // Update local state immediately
+                chatHistories[newChatId] = [];
+                chatDisplayNames[newChatId] = "New Chat";
+                isFirstMessage[newChatId] = true; // Mark for title generation
+
+                // Re-render list and select
+                const chatListArray = Object.keys(chatDisplayNames).map(id => ({
+                    chat_id: id,
+                    title: chatDisplayNames[id]
+                }));
+                renderChatList(chatListArray);
+                await selectChat(newChatId); // Select the new chat
+                addMessageToChatbox('system', "New chat started. Ask a question!", 'info', null, false);
+
+            } else {
+                throw new Error(data.error || 'Failed to create chat, no ID returned.');
+            }
+        } catch (error) {
+            console.error('Error creating new chat:', error);
+            // Display error in the chatbox if possible, otherwise fallback
+            if (chatbox) {
+                 addMessageToChatbox('system', `Error creating new chat: ${error.message}`, 'error', null, false);
+            } else {
+                 alert(`Error creating new chat: ${error.message}`);
+            }
+            // If creation fails, we might want to revert state or disable controls
+            disableChatControls();
+            currentChatId = null;
+            sessionStorage.removeItem('currentChatId');
+        } finally {
+            toggleLoading(false);
+            newChatButton.disabled = !dataLoaderSection.style.display === 'none'; // Re-enable only if chat UI is shown
+        }
+        return newChatId; // Return the ID or null
+    }
+
+    // NEW: Fetch server status helper
+    async function fetchServerStatus() {
+        try {
+            const response = await fetch('/status');
+            if (!response.ok) {
+                console.error('Failed to fetch status:', response.status);
+                return null;
+            }
+            return await response.json();
+        } catch (error) {
+            console.error("Error fetching server status:", error);
+            return null;
+        }
+    }
+
+    // MODIFIED: Event handler for the New Chat button
+    function handleNewChatClick() {
+        if (dataLoaderSection.style.display !== 'none') {
+            // If data loader is shown, this button shouldn't be active, but handle defensively
+            alert("Please upload data first.");
+            return;
+        }
+        createNewChat(); // Call the new function
+    }
 
 }); 
