@@ -1,0 +1,11 @@
+---
+# ansible/inventory.yml
+# Defines the hosts Ansible will run against.
+# For deploying to Kubernetes using kubectl from the control node,
+# we often target localhost.
+
+all:
+  hosts:
+    localhost:
+      ansible_connection: local # Run directly on the machine executing Ansible
+      ansible_python_interpreter: "{{ ansible_playbook_python }}" # Use same python as ansible 
