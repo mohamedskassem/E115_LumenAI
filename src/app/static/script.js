@@ -673,20 +673,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const activeChatIds = serverStatus.active_chats.map(c => c.chat_id);
 
-            // Validate storedChatId
+            // If a valid chat ID exists in sessionStorage for this tab, try to restore it
             if (storedChatId && activeChatIds.includes(storedChatId)) {
                 console.log(`Restoring session for chat ID: ${storedChatId}`);
                 await selectChat(storedChatId); // Select the stored chat
                 enableChatControls();
-            } else if (activeChatIds.length > 0) {
-                // If stored ID invalid/missing, but chats exist, select the first one
-                console.log(`Stored chat ID invalid or missing, selecting first available: ${activeChatIds[0]}`);
-                await selectChat(activeChatIds[0]); // Select the first available chat
-                enableChatControls();
             } else {
-                // Data loaded, but no chats exist on server (e.g., after fresh load or delete all)
-                console.log("Data loaded, but no active chats found on server. Creating new chat.");
+                // If no valid ID in sessionStorage, ALWAYS create a new chat for this new session
+                console.log("No valid stored chat ID found for this session, creating a new chat.");
+                if (storedChatId) { sessionStorage.removeItem('currentChatId'); } // Clear invalid stored ID
                 await createNewChat(); // Create a new one
+                // enableChatControls() will be called by selectChat inside createNewChat
             }
         } else {
             // Data not loaded on server
