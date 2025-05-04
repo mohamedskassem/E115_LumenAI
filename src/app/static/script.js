@@ -682,9 +682,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const activeChatIds = serverStatus.active_chats.map(c => c.chat_id);
 
+            // --- Debug Log --- 
+            console.log(`[initializeChat] Decision Point: storedChatId='${storedChatId}', activeChatIds=${JSON.stringify(activeChatIds)}, includesStored=${activeChatIds.includes(storedChatId)}`);
+            // --- End Debug Log --- 
+
             // If a valid chat ID exists in sessionStorage for this tab, try to restore it
             if (storedChatId && activeChatIds.includes(storedChatId)) {
-                console.log(`[initializeChat] Restoring session for chat ID: ${storedChatId}`);
+                console.log(`[initializeChat] Decision: Restore session for chat ID: ${storedChatId}`);
                 await selectChat(storedChatId); // Select the stored chat
                 enableChatControls();
             } else {
