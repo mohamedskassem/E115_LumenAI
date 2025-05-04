@@ -27,11 +27,6 @@ document.addEventListener('DOMContentLoaded', () => {
     let chatDisplayNames = {}; // Store display names { chatId: displayName }
     let isFirstMessage = {}; // Track if the next message is the first for title gen {chatId: true/false}
 
-    // --- Force clear session storage on load for debugging --- 
-    console.log("[Debug] Forcing clear of sessionStorage for currentChatId");
-    sessionStorage.removeItem('currentChatId');
-    // --- End Force Clear --- 
-
     // Initial State Check
     // Use sessionStorage to persist chat ID across refreshes within the same tab
     initializeChat();
