@@ -224,6 +224,121 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    // NEW: Function to initialize or restore chat session
+    async function initializeChat() {
+        console.log("[initializeChat] START");
+        const storedChatId = sessionStorage.getItem('currentChatId');
+        console.log("[initializeChat] Stored chat ID:", storedChatId);
+
+        const serverStatus = await fetchServerStatus();
+        console.log("[initializeChat] Server Status:", serverStatus);
+
+        if (serverStatus && serverStatus.is_data_loaded) {
+            showChatInterface(); // Show chat if data is loaded
+            console.log("[initializeChat] Data loaded, showing chat interface.");
+
+            // Update local display names from server data
+            chatDisplayNames = serverStatus.active_chats.reduce((acc, chat) => {
+                acc[chat.chat_id] = chat.title;
+                return acc;
+            }, {});
+            const activeChatIds = serverStatus.active_chats.map(c => c.chat_id);
+            let chatIdToSelect = null;
+
+            // Try to restore ONLY if a valid chat ID exists in sessionStorage
+            if (storedChatId && activeChatIds.includes(storedChatId)) {
+                console.log(`[initializeChat] Decision: Restore session for chat ID: ${storedChatId}`);
+                chatIdToSelect = storedChatId;
+            } else if (activeChatIds.length > 0) {
+                 // If no valid stored ID, but chats exist, select the first one
+                 console.log("[initializeChat] Decision: No valid stored ID, selecting first available chat:", activeChatIds[0]);
+                 if (storedChatId) { sessionStorage.removeItem('currentChatId'); } // Clear invalid stored ID
+                 chatIdToSelect = activeChatIds[0];
+            } else {
+                // No stored ID and no chats on server - need to create one
+                console.log("[initializeChat] Decision: No chats available, creating new one.");
+                if (storedChatId) { sessionStorage.removeItem('currentChatId'); } 
+                const createdChatId = await createNewChat(); // Create one
+                if (createdChatId) {
+                    chatIdToSelect = createdChatId;
+                } else {
+                    console.error("[initializeChat] Failed to create initial chat.");
+                    showDataLoader(); // Fallback
+                    return;
+                }
+            }
+
+            // Render list and select the determined chat
+            console.log(`[initializeChat] Rendering final list and selecting: ${chatIdToSelect}`);
+            const finalChatList = Object.keys(chatDisplayNames).map(id => ({ chat_id: id, title: chatDisplayNames[id] }));
+            renderChatList(finalChatList, chatIdToSelect); // Pass the ID to select/highlight
+            
+            if (chatIdToSelect) {
+                await selectChat(chatIdToSelect);
+                enableChatControls();
+            } else {
+                disableChatControls();
+            }
+
+        } else {
+            // Data not loaded on server
+            console.log("Data not loaded on server.");
+            showDataLoader();
+            disableChatControls();
+            chatList.innerHTML = '';
+            currentChatId = null;
+            sessionStorage.removeItem('currentChatId');
+            chatDisplayNames = {};
+            chatHistories = {};
+            isFirstMessage = {};
+        }
+        console.log("[initializeChat] END");
+    }
+
+    // REVERTED: createNewChat - Simplified back, just updates state
+    async function createNewChat() {
+        console.log('[createNewChat] Requesting new chat from server...');
+        newChatButton.disabled = true;
+        toggleLoading(true);
+        let newChatId = null;
+
+        try {
+            const response = await fetch('/chats', { method: 'POST' });
+            if (!response.ok) {
+                const errData = await response.json().catch(() => ({}));
+                throw new Error(errData.error || `HTTP error! status: ${response.status}`);
+            }
+            const data = await response.json();
+            if (data.chat_id) {
+                newChatId = data.chat_id;
+                console.log('[createNewChat] New chat created successfully:', newChatId);
+                // Update local state immediately
+                chatHistories[newChatId] = [];
+                chatDisplayNames[newChatId] = "New Chat";
+                isFirstMessage[newChatId] = true;
+                console.log('[createNewChat] Local state updated for:', newChatId);
+            } else {
+                throw new Error(data.error || 'Failed to create chat, no ID returned.');
+            }
+        } catch (error) {
+            console.error('Error creating new chat:', error);
+            if (chatbox) {
+                 addMessageToChatbox('system', `Error creating new chat: ${error.message}`, 'error', null, false);
+            } else {
+                 alert(`Error creating new chat: ${error.message}`);
+            }
+            disableChatControls();
+            currentChatId = null;
+            sessionStorage.removeItem('currentChatId');
+        } finally {
+            toggleLoading(false);
+            // Re-enable button only if a chat is now active
+            newChatButton.disabled = !currentChatId;
+        }
+        return newChatId; // Return the ID or null
+    }
+    
+    // REVERTED: uploadFiles - Handle UI and state update directly
     async function uploadFiles() {
         const files = csvUpload.files;
         if (files.length === 0) return;
@@ -254,19 +369,44 @@ document.addEventListener('DOMContentLoaded', () => {
             csvUpload.value = '';
             handleFileSelection();
 
-            // Clear existing session state and initialize fresh after upload
-            currentChatId = null;
+            // --- Explicitly handle state and UI after upload --- 
+            const newChatId = data.new_chat_id;
+            if (!newChatId) {
+                throw new Error("Upload succeeded but server did not return a new chat ID.");
+            }
+            console.log(`[uploadFiles] Upload successful, using new chat ID: ${newChatId}`);
+            
+            // Clear ALL local state
+            currentChatId = null; 
             sessionStorage.removeItem('currentChatId');
             chatHistories = {};
             chatDisplayNames = {};
             isFirstMessage = {};
-            await initializeChat(); // Re-initialize after successful upload
+            
+            // Set state for the new chat
+            currentChatId = newChatId;
+            sessionStorage.setItem('currentChatId', newChatId);
+            chatHistories[currentChatId] = [];
+            chatDisplayNames[currentChatId] = "New Chat"; // Server might provide a title later
+            isFirstMessage[currentChatId] = true;
+            
+            // Switch UI FIRST
+            showChatInterface();
+            console.log("[uploadFiles] Chat interface shown.");
+            
+            // Render list with only the new chat initially
+            renderChatList([{ chat_id: currentChatId, title: "New Chat" }], currentChatId);
+
+            // Select the chat to show initial message etc.
+            selectChat(currentChatId); // Call selectChat AFTER setting currentChatId
+            enableChatControls(); // Ensure controls are enabled
 
         } catch (error) {
             console.error('Error uploading files:', error);
             uploadStatus.textContent = `Error: ${error.message}`;
             uploadStatus.className = 'status-message error';
             uploadButton.disabled = false; // Re-enable on error
+            showDataLoader(); // Stay on data loader on error
         }
     }
 
@@ -674,119 +814,6 @@ document.addEventListener('DOMContentLoaded', () => {
     // --- Initial Load ---
     checkStatusAndLoadChats();
     adjustTextareaHeight();
-
-    // NEW: Function to initialize or restore chat session
-    async function initializeChat() {
-        console.log("[initializeChat] START");
-        let restoredSession = false; // Flag to track if we restored a session
-        const storedChatId = sessionStorage.getItem('currentChatId');
-        console.log("[initializeChat] Stored chat ID:", storedChatId);
-
-        // Fetch current server state regardless
-        const serverStatus = await fetchServerStatus();
-        console.log("[initializeChat] Server Status:", serverStatus);
-
-        if (serverStatus && serverStatus.is_data_loaded) {
-            // Update local maps with server data first
-            chatDisplayNames = serverStatus.active_chats.reduce((acc, chat) => {
-                acc[chat.chat_id] = chat.title;
-                return acc;
-            }, {});
-            // Render the list BUT do not automatically select here
-            renderChatList(serverStatus.active_chats, null); // Pass null to avoid auto-selection in render
-            console.log("[initializeChat] Rendered chat list without auto-selection.");
-
-            const activeChatIds = serverStatus.active_chats.map(c => c.chat_id);
-
-            // Decide whether to restore or create new
-            if (storedChatId && activeChatIds.includes(storedChatId)) {
-                console.log(`[initializeChat] Decision: Restore session for chat ID: ${storedChatId}`);
-                chatIdToSelect = storedChatId;
-            } else { // No valid stored ID found, MUST create new
-                console.log("[initializeChat] Decision: No valid stored ID found. Needs new chat.");
-                if (storedChatId) { 
-                    console.log("[initializeChat] Removing invalid stored ID:", storedChatId);
-                    sessionStorage.removeItem('currentChatId'); 
-                } 
-                needsNewChat = true; // Always set flag to create new if not restoring
-            }
-            
-            // Create new chat if needed
-            if (needsNewChat) {
-                console.log("[initializeChat] No session restored, proceeding to create new chat.");
-                await createNewChat(); // Now create the new chat
-            }
-
-        } else {
-            // Data not loaded on server
-            console.log("Data not loaded on server.");
-            showDataLoader();
-            disableChatControls();
-            chatList.innerHTML = '';
-            currentChatId = null;
-            sessionStorage.removeItem('currentChatId');
-            chatDisplayNames = {};
-            chatHistories = {};
-            isFirstMessage = {};
-        }
-    }
-
-    // NEW: Function to explicitly create a new chat session
-    async function createNewChat() {
-        console.log('[createNewChat] Requesting new chat from server...');
-        newChatButton.disabled = true;
-        toggleLoading(true);
-        let newChatId = null;
-
-        try {
-            const response = await fetch('/chats', { method: 'POST' });
-            if (!response.ok) {
-                const errData = await response.json().catch(() => ({}));
-                throw new Error(errData.error || `HTTP error! status: ${response.status}`);
-            }
-            const data = await response.json();
-            if (data.chat_id) {
-                newChatId = data.chat_id;
-                console.log('[createNewChat] New chat created successfully:', newChatId);
-
-                // Update local state immediately
-                chatHistories[newChatId] = [];
-                chatDisplayNames[newChatId] = "New Chat";
-                isFirstMessage[newChatId] = true; // Mark for title generation
-                console.log('[createNewChat] Local state updated for:', newChatId);
-
-                // Re-render list and select
-                const chatListArray = Object.keys(chatDisplayNames).map(id => ({
-                    chat_id: id,
-                    title: chatDisplayNames[id]
-                }));
-                console.log('[createNewChat] Rendering chat list:', chatListArray);
-                renderChatList(chatListArray);
-                console.log('[createNewChat] Calling selectChat for:', newChatId);
-                await selectChat(newChatId); // Select the new chat
-                addMessageToChatbox('system', "New chat started. Ask a question!", 'info', null, false);
-
-            } else {
-                throw new Error(data.error || 'Failed to create chat, no ID returned.');
-            }
-        } catch (error) {
-            console.error('Error creating new chat:', error);
-            // Display error in the chatbox if possible, otherwise fallback
-            if (chatbox) {
-                 addMessageToChatbox('system', `Error creating new chat: ${error.message}`, 'error', null, false);
-            } else {
-                 alert(`Error creating new chat: ${error.message}`);
-            }
-            // If creation fails, we might want to revert state or disable controls
-            disableChatControls();
-            currentChatId = null;
-            sessionStorage.removeItem('currentChatId');
-        } finally {
-            toggleLoading(false);
-            newChatButton.disabled = !dataLoaderSection.style.display === 'none'; // Re-enable only if chat UI is shown
-        }
-        return newChatId; // Return the ID or null
-    }
 
     // NEW: Fetch server status helper
     async function fetchServerStatus() {
