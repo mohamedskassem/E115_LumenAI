@@ -698,30 +698,21 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const activeChatIds = serverStatus.active_chats.map(c => c.chat_id);
 
-            // --- Debug Log --- 
-            console.log(`[initializeChat] Decision Point: storedChatId='${storedChatId}', activeChatIds=${JSON.stringify(activeChatIds)}, includesStored=${activeChatIds.includes(storedChatId)}`);
-            // --- End Debug Log --- 
-
-            // Try to restore ONLY if a valid chat ID exists in sessionStorage
+            // Decide whether to restore or create new
             if (storedChatId && activeChatIds.includes(storedChatId)) {
                 console.log(`[initializeChat] Decision: Restore session for chat ID: ${storedChatId}`);
-                // Select chat *without* awaiting here, let UI update happen
-                selectChat(storedChatId); 
-                enableChatControls();
-                restoredSession = true;
-            } else {
-                // If no valid ID in sessionStorage, need to create a new one.
-                console.log("[initializeChat] Decision: No valid stored chat ID found.");
+                chatIdToSelect = storedChatId;
+            } else { // No valid stored ID found, MUST create new
+                console.log("[initializeChat] Decision: No valid stored ID found. Needs new chat.");
                 if (storedChatId) { 
                     console.log("[initializeChat] Removing invalid stored ID:", storedChatId);
                     sessionStorage.removeItem('currentChatId'); 
                 } 
-                // Set flag to create new chat AFTER this function finishes initial UI setup
-                // createNewChat(); // Don't call directly here
+                needsNewChat = true; // Always set flag to create new if not restoring
             }
             
-            // If no session was restored, create a new one now
-            if (!restoredSession) {
+            // Create new chat if needed
+            if (needsNewChat) {
                 console.log("[initializeChat] No session restored, proceeding to create new chat.");
                 await createNewChat(); // Now create the new chat
             }
