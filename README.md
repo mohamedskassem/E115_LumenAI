@@ -247,7 +247,8 @@ graph TD
     M(External User) -- Access --> I;
     E -- Image Pull --> H;
 
-    P(Ansible - Optional) -.-> F; # Optional Provisioning/Config
+    %% Optional Provisioning/Config using Ansible
+    P(Ansible - Optional) -.-> F;
 
 ```
 
