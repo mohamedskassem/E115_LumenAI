@@ -28,6 +28,7 @@ This project implements a containerized conversational agent that allows users t
 *   **Enhanced LLM Context:** The **cached detailed schema analysis** is provided as additional context to the LLM during question validation, SQL generation, and results analysis, improving accuracy and understanding.
 *   **Containerized Deployment:** Fully containerized using Docker for easy setup and execution.
 *   **Simplified Execution:** Includes a `dockershell.sh` script to build the Docker image and run the container with necessary volume mounts (including persistence for the schema analysis cache), environment variables (API keys), and port mappings.
+*   **Limitation:** The current application runs as a single global instance. It does not yet support concurrent, isolated sessions for multiple independent users.
 
 ## Architecture Overview
 
