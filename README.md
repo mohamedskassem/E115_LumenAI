@@ -232,7 +232,7 @@ Deploying this containerized application to Google Kubernetes Engine (GKE) on Go
 
 ```mermaid
 graph TD
-    subgraph Recommended CI/CD Flow
+    subgraph CI/CD Flow
         direction LR
         A[Developer] -- Git Push --> B(GitHub Repository);
         B -- Trigger --> C{GitHub Actions CI/CD};
@@ -242,7 +242,7 @@ graph TD
         C -- Deploy (kubectl apply) --> F[GKE Cluster];
     end
 
-    subgraph Alternative Ansible Flow
+    subgraph Ansible Flow
         direction LR
         AA["Developer/Operator"] --> BB{Ansible Controller};
         CC["Playbooks (provision_gke.yml, deploy_app.yml)"] --> BB;
