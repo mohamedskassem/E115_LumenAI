@@ -238,16 +238,16 @@ graph TD
         B -- Trigger --> C{GitHub Actions CI/CD};
         C -- Build --> D(Docker Image);
         C -- Test/Lint --> C;
-        D -- Push --> E(Google Container Registry / Artifact Registry);
+        D -- Push --> E["Google Container Registry / Artifact Registry"];
         C -- Deploy (kubectl apply) --> F[GKE Cluster];
     end
 
     subgraph Alternative Ansible Flow
         direction LR
-        AA[Developer/Operator] --> BB{Ansible Controller};
+        AA["Developer/Operator"] --> BB{Ansible Controller};
         CC["Playbooks (provision_gke.yml, deploy_app.yml)"] --> BB;
         DD["Inventory (inventory.yml)"] --> BB;
-        EE[Variables (Env Vars / Extra Vars)] --> BB;
+        EE["Variables (Env Vars / Extra Vars)"] --> BB;
         BB -- Provision --> FF(GCP APIs);
         BB -- Deploy --> F;
     end
