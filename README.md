@@ -245,7 +245,7 @@ graph TD
     subgraph Alternative Ansible Flow
         direction LR
         AA[Developer/Operator] --> BB{Ansible Controller};
-        CC[Playbooks (provision_gke.yml, deploy_app.yml)] --> BB;
+        CC["Playbooks (provision_gke.yml, deploy_app.yml)"] --> BB;
         DD[Inventory (inventory.yml)] --> BB;
         EE[Variables (Env Vars / Extra Vars)] --> BB;
         BB -- Provision --> FF(GCP APIs);
