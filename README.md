@@ -4,6 +4,14 @@
 
 This project implements a containerized conversational agent that allows users to query a database (e.g., Adventure Works) using natural language through a web interface.
 
+## Accessing the Live Demo
+
+The application is currently deployed and accessible at:
+
+**[http://35.238.197.154/](http://35.238.197.154/)**
+
+*(Note: This IP address is for the current deployment instance and may change if the application is redeployed.)*
+
 ## Key Features & Enhancements
 
 *   **Multi-Chat Web Interface:** A simple, clean web UI (HTML/CSS/JS) featuring a **sidebar for managing multiple independent chat sessions**. Users can create new chats, switch between them, and delete individual chats via an icon in the sidebar.
@@ -224,14 +232,27 @@ Deploying this containerized application to Google Kubernetes Engine (GKE) on Go
 
 ```mermaid
 graph TD
-    A[Developer] -- Git Push --> B(GitHub Repository);
-    B -- Trigger --> C{GitHub Actions CI/CD};
-    C -- Build --> D(Docker Image);
-    C -- Test/Lint --> C;
-    D -- Push --> E(Google Container Registry / Artifact Registry);
-    C -- Deploy (kubectl apply) --> F[GKE Cluster];
+    subgraph Recommended CI/CD Flow
+        direction LR
+        A[Developer] -- Git Push --> B(GitHub Repository);
+        B -- Trigger --> C{GitHub Actions CI/CD};
+        C -- Build --> D(Docker Image);
+        C -- Test/Lint --> C;
+        D -- Push --> E(Google Container Registry / Artifact Registry);
+        C -- Deploy (kubectl apply) --> F[GKE Cluster];
+    end
 
-    subgraph GKE Cluster
+    subgraph Alternative Ansible Flow
+        direction LR
+        AA[Developer/Operator] --> BB{Ansible Controller};
+        CC[Playbooks (provision_gke.yml, deploy_app.yml)] --> BB;
+        DD[Inventory (inventory.yml)] --> BB;
+        EE[Variables (Env Vars / Extra Vars)] --> BB;
+        BB -- Provision --> FF(GCP APIs);
+        BB -- Deploy --> F;
+    end
+
+    subgraph GKE Cluster Resources
         G(Deployment) -- Manages --> H(Pods - LumenAI App Container);
         I(Service - LoadBalancer) -- Exposes --> H;
         H -- Mounts --> J(Secrets - API Keys);
@@ -246,52 +267,152 @@ graph TD
 
     M(External User) -- Access --> I;
     E -- Image Pull --> H;
-
-    %% Optional Provisioning/Config using Ansible
-    P(Ansible - Optional) -.-> F;
+    FF -- Creates/Manages --> F;
 
 ```
 
 ## Running Instructions
 
+This section describes the primary automated deployment method and alternative approaches.
+
+### 1. Automated Deployment (GitHub Actions - Recommended)
+
+This project is configured with a CI/CD pipeline using GitHub Actions, making deployment straightforward.
+
+**Workflow:**
+
+1.  **Develop & Commit:** Make your code changes locally.
+    ```bash
+    # Example: Add changes and commit
+    git add .
+    git commit -m "feat: Implement new feature"
+    ```
+2.  **Push to `main`:** Push your committed changes to the `main` branch of the GitHub repository.
+    ```bash
+    git push origin main
+    ```
+3.  **Automated Pipeline Execution:** The push automatically triggers the GitHub Actions workflow defined in `.github/workflows/deploy.yml` (ensure this file exists and is correctly configured). This pipeline executes the following steps:
+    *   **Linting/Static Analysis:** Checks code quality (e.g., using `flake8` or `black`).
+    *   **(Optional) Testing:** Runs automated tests (e.g., using `pytest`).
+    *   **Build Docker Image:** Builds the application's Docker image using the `Dockerfile`.
+        ```bash
+        # Example command within the pipeline script
+        docker build -t $REGISTRY_PATH .
+        ```
+    *   **Push to Registry:** Pushes the tagged image to Google Container Registry (GCR) or Artifact Registry.
+        ```bash
+        # Example command within the pipeline script
+        docker push $REGISTRY_PATH
+        ```
+    *   **Deploy to GKE:** Connects to your GKE cluster and applies the Kubernetes manifests from the `k8s/` directory.
+        ```bash
+        # Example commands within the pipeline script
+        gcloud container clusters get-credentials $GKE_CLUSTER --zone $GKE_ZONE --project $GCP_PROJECT_ID
+        kubectl apply -f k8s/
+        ```
+
+**Accessing the Deployed Application:**
+
+*   Once the pipeline completes successfully, the application should be accessible via the external IP address assigned to the Kubernetes `LoadBalancer` service.
+*   Find the IP address using `kubectl` (ensure `kubectl` is configured for your GKE cluster):
+    ```bash
+    # Get the external IP of the service (replace service-name and namespace if needed)
+    kubectl get service lumenai-service --namespace default -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+    ```
+    (Replace `lumenai-service` with the actual name defined in your `service.yaml` and `default` with the correct namespace if applicable).
+*   Access the application in your browser using the retrieved IP: `http://<EXTERNAL-IP>`. (The LoadBalancer typically maps external port 80 to the container's port 5000).
+
+**Prerequisites for Automated Flow:**
+
+*   **GCP Setup:** A configured GCP project with GKE and Container Registry/Artifact Registry enabled and APIs activated.
+*   **GKE Cluster:** An active GKE cluster.
+*   **Kubernetes Manifests:** Kubernetes YAML files (`deployment.yaml`, `service.yaml`, `secret.yaml`, `pvc.yaml`, etc.) committed to the repository (e.g., in a `k8s/` directory). The `service.yaml` should typically be of type `LoadBalancer`.
+*   **GitHub Actions Secrets:** GCP credentials (e.g., a Service Account Key JSON) configured as an encrypted secret (e.g., `GCP_SA_KEY`) in your GitHub repository settings (`Settings -> Secrets and variables -> Actions`). The workflow file also needs environment variables set (e.g., `GCP_PROJECT_ID`, `GKE_CLUSTER`, `GKE_ZONE`, `REGISTRY_PATH`).
+
+### 2. Alternative Deployment (Ansible)
+
+This project includes Ansible playbooks located in the `ansible/` directory to automate provisioning the GKE cluster and deploying the application.
+
+**Prerequisites:**
+
+*   Ansible installed (`pip install ansible google-auth google-cloud-storage google-cloud-container google-api-python-client requests`).
+*   GCP Service Account Key JSON file downloaded for authentication.
+*   Required Environment Variables Set:
+    *   `GCP_PROJECT_ID`: Your Google Cloud Project ID.
+    *   `GCP_ZONE`: The GCP zone for the cluster (e.g., `us-central1-c`).
+    *   `GCP_SERVICE_ACCOUNT_FILE`: Absolute path to your downloaded Service Account Key JSON file.
+    *   `GOOGLE_API_KEY_SECRET`: Your Google API Key.
+    *   `OPENAI_API_KEY_SECRET`: Your OpenAI API Key.
+*   Docker image built and pushed to GCR/Artifact Registry (see step in Automated Deployment section or Manual Setup).
+
+**Playbooks:**
+
+1.  **`provision_gke.yml`:**
+    *   **Purpose:** Enables required GCP APIs and creates the GKE cluster idempotently.
+    *   **Run Command (from the repository root):
+        ```bash
+        ansible-playbook ansible/provision_gke.yml -i ansible/inventory.yml \
+          # Optional: Override default cluster name, zone, machine type, etc.
+          # -e "gke_cluster_name=my-custom-name" \
+          # -e "gcp_zone=us-east1-b"
+        ```
+
+2.  **`deploy_app.yml`:**
+    *   **Purpose:** Creates the Kubernetes secret for API keys, applies the Kubernetes manifests (`pvc.yaml`, `deployment.yaml.j2`, `service.yaml`) from the `k8s/` directory, waits for rollout, and displays the external IP.
+    *   **Run Command (from the repository root, AFTER provisioning and pushing the Docker image):
+        ```bash
+        # Ensure kubectl context is set to the new cluster (gcloud get-credentials...)
+        ansible-playbook ansible/deploy_app.yml -i ansible/inventory.yml \
+          # Optional: Specify a different image tag if not 'latest' or Git SHA
+          # -e "image_tag=v1.2.3"
+        ```
+
+**Workflow:**
+
+1.  Set the required environment variables.
+2.  Run the `provision_gke.yml` playbook.
+3.  Build and push your desired Docker image version to the registry.
+4.  Ensure your local `kubectl` context points to the newly created GKE cluster (the provision playbook attempts this, or run `gcloud container clusters get-credentials...` manually).
+5.  Run the `deploy_app.yml` playbook, optionally passing the specific `image_tag` if needed.
+
+### 3. Manual Setup Overview (GCP/GKE Components)
+
+While the automated flow is recommended, understanding the underlying components is helpful. A manual deployment involves interacting directly with:
+
+*   **GCP Project:** The foundation on Google Cloud. (`gcloud config set project YOUR_PROJECT_ID`)
+*   **GKE Cluster:** The Kubernetes environment. (`gcloud container clusters create ...`, `gcloud container clusters get-credentials ...`)
+*   **Container Registry (GCR/Artifact Registry):** Stores Docker images. (`gcloud auth configure-docker`, `docker push ...`)
+*   **Docker:** Used to build the container image locally. (`docker build -t ... .`)
+*   **`kubectl`:** The command-line tool to interact with GKE. (`kubectl apply -f ...`, `kubectl get ...`, `kubectl create secret ...`)
+*   **Kubernetes Manifests (`k8s/`):** YAML files defining the desired state (Deployment, Service, Secrets, PVCs).
+
+*(Detailed instructions for manually setting up each GCP/GKE component and deploying using `kubectl` are beyond the scope of this README but involve using the `gcloud` and `kubectl` commands exemplified above extensively.)*
+
+### Local Development & Testing
+
+For local development before pushing:
+
 **Prerequisites:**
 
 *   Docker installed and running.
-*   Git (to clone the repository).
-*   An OpenAI API key (with access to `gpt-4-turbo` for schema analysis).
-*   A Google API Key (for the default query model, Gemini).
+*   Git.
+*   API Keys (OpenAI, Google) placed in `./secrets/openai_api_key.txt` and `./secrets/google_api_key.txt` respectively (within `src/app`).
 
 **Steps:**
 
-1.  **Clone the repository** (if you haven't already).
-2.  **Navigate to the application directory:**
+1.  Navigate to `src/app`.
+2.  Ensure secrets files exist (`mkdir -p secrets`, create the `.txt` files).
+3.  Run using the provided script:
     ```bash
-    cd path/to/repository/src/app
+    chmod +x dockershell.sh
+    bash dockershell.sh
     ```
-3.  **Create Secrets File(s):**
-    *   Create the directory `secrets` if it doesn't exist: `mkdir -p secrets`
-    *   **OpenAI:** Create `secrets/openai_api_key.txt`. Paste *only* your OpenAI API key into this file and save it.
-    *   **Google:** Create `secrets/google_api_key.txt`. Paste *only* your Google API key into this file and save it.
-4.  **Run the Application:**
-    *   Make the script executable (if necessary): `chmod +x dockershell.sh`
-    *   Execute the script:
-        ```bash
-        bash dockershell.sh
-        ```
-        This script will:
-        *   Build the Docker image (`text-to-sql-app`), installing dependencies including `flasgger`.
-        *   Stop and remove any previously running container named `lumenai`.
-        *   Run a new container named `lumenai`, mapping host port 5001 to container port 5000 (`-p 5001:5000`), passing the OpenAI and Google API key environment variables, and mounting necessary volumes (`output`, `secrets`, `vector_store_cache`, `schema_analysis_cache`, `uploads`).
+4.  Access the application at `http://localhost:5001`.
 
-5.  **Access the Application:**
-    *   Open your web browser and navigate to: `http://localhost:5001`
-6.  **(First Run/No Data):** Use the UI to upload CSV files. This will create the `output/user_data.db`, analyze the schema (using GPT-4 Turbo), save the analysis cache, build the vector index, create an initial chat session, and enable the chat interface.
-7.  **Access API Docs:** Navigate to `http://localhost:5001/apidocs/`
-
-## Requirements Summary
+## Requirements Summary (for Local Execution)
 
 *   Docker
-*   Python 3.9+ (as specified in Dockerfile)
-*   OpenAI API Key (`gpt-4-turbo` access required for schema analysis)
-*   Google API Key (required for default query/title model)
-*   Required Python packages (installed via Pipfile within Docker): `Flask`, `flasgger`, `google-generativeai`, `llama-index`, `llama-index-llms-openai`, `llama-index-llms-gemini`, `llama-index-embeddings-openai`, `openai`, `pandas`, etc.
+*   Python 3.9+ (defined in Dockerfile)
+*   OpenAI API Key (`gpt-4-turbo` access recommended)
+*   Google API Key (for Gemini model)
+*   Required Python packages (installed via Pipfile within Docker): `Flask`, `flasgger`, `google-generativeai`, `llama-index`, etc.
