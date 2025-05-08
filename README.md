@@ -201,7 +201,7 @@ The application leverages several machine learning components:
 ## Deployment & CI/CD
 
 *   **Containerization:** The application is packaged as a Docker container, encapsulating all dependencies and ensuring consistent execution across environments. The `Dockerfile` and `dockershell.sh` script facilitate building and running the container.
-*   **CI/CD Pipeline (Conceptual):** While not fully implemented in this version, a CI/CD pipeline could be set up using tools like GitHub Actions:
+*   **CI/CD Pipeline (GitHub Actions):** This project utilizes a GitHub Actions workflow for continuous integration and continuous deployment. The pipeline is automatically triggered on pushes or merges to the `main` branch.
     *   **Trigger:** On push/merge to the `main` branch.
     *   **Steps:**
         1.  Linting and static analysis.
@@ -212,21 +212,32 @@ The application leverages several machine learning components:
 
 ## Kubernetes Deployment on GCP (GKE)
 
-Deploying this containerized application to Google Kubernetes Engine (GKE) on Google Cloud Platform (GCP) would involve the following general steps:
+The application is deployed to Google Kubernetes Engine (GKE) on Google Cloud Platform (GCP). The deployment process and configuration are as follows:
 
-1.  **Prerequisites:**
-    *   A GCP project with billing enabled.
-    *   `gcloud` CLI installed and configured.
-    *   `kubectl` installed.
-    *   A GKE cluster created.
-    *   Docker image pushed to Google Container Registry (GCR) or Artifact Registry.
-2.  **Kubernetes Manifests:** Create YAML files for Kubernetes resources:
-    *   `Deployment`: Defines how to run multiple replicas (pods) of the application container. It would specify the Docker image location (GCR), resource requests/limits, and environment variables (potentially mounting secrets for API keys).
-    *   `Service`: Exposes the application running in the pods. A `LoadBalancer` service type could be used to get an external IP address for web access.
-    *   `Secret`: To securely manage API keys (OpenAI, Google) rather than hardcoding or passing directly as environment variables in the Deployment manifest.
-    *   `PersistentVolume` & `PersistentVolumeClaim`: To provide persistent storage for the `output`, `vector_store_cache`, and `schema_analysis_cache` directories if needed across pod restarts/redeployments. GKE offers persistent disks for this.
-3.  **Deployment:** Apply the manifests using `kubectl apply -f <manifest-directory>/`.
-4.  **Configuration Management (Optional):** Tools like Ansible could potentially be used to automate the provisioning of the GKE cluster itself or to manage application configuration updates, although Kubernetes manifests are the primary way to manage the application deployment within the cluster.
+**Prerequisites for the existing deployment:**
+*   A GCP project with billing enabled.
+*   `gcloud` CLI installed and configured for interaction with the project.
+*   `kubectl` installed for managing Kubernetes resources.
+*   An active GKE cluster.
+*   The application's Docker image pushed to Google Container Registry (GCR) or Artifact Registry.
+
+**Kubernetes Manifests & Resources:**
+The deployment utilizes YAML manifest files for the following Kubernetes resources:
+*   **`Deployment`**: Manages the application pods, specifying the Docker image from GCR/Artifact Registry, resource requests/limits, and environment variables (with API keys mounted from Secrets).
+*   **`Service`**: An external LoadBalancer service exposes the application, providing an external IP address for web access.
+*   **`Secret`**: API keys (OpenAI, Google) are managed securely using Kubernetes Secrets and mounted into the application pods, avoiding hardcoding.
+*   **`PersistentVolume` & `PersistentVolumeClaim`**: Persistent storage is provisioned using GCP persistent disks for the `output/`, `vector_store_cache/`, and `schema_analysis_cache/` directories, ensuring data persistence across pod restarts and deployments.
+
+**Deployment Process:**
+The Kubernetes manifests are applied to the GKE cluster using `kubectl apply -f <manifest-directory>/`.
+
+**Node Pool Scaling:**
+The GKE cluster's node pools have been tested for scaling both up and down to adjust compute resources as needed. Scaling is performed using the `gcloud` command. For example, to resize a node pool:
+`gcloud container clusters resize CLUSTER_NAME --node-pool=NODE_POOL_NAME --num-nodes=DESIRED_NODE_COUNT --zone=CLUSTER_ZONE`
+*(Replace `CLUSTER_NAME`, `NODE_POOL_NAME`, `DESIRED_NODE_COUNT`, and `CLUSTER_ZONE` with your specific values).*
+
+**Configuration Management:**
+While Ansible can be used for provisioning the GKE cluster itself (as detailed in the Ansible deployment section), the application deployment within the cluster is primarily managed via the Kubernetes manifests.
 
 * **Deployment Architecture Diagram:** *
 
