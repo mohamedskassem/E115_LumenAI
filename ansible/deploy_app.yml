@@ -23,6 +23,39 @@
       ansible.builtin.debug:
         msg: "Deploying to Kubernetes context: {{ kubectl_context.stdout }}"
 
+    - name: Check for required API Key Environment Variables
+      ansible.builtin.fail:
+        msg: "Required environment variable '{{ item }}' is not set."
+      when: lookup('env', item) is none or lookup('env', item) | length == 0
+      loop:
+        - GOOGLE_API_KEY_SECRET
+        - OPENAI_API_KEY_SECRET
+      run_once: yes # Only check once
+
+    - name: Delete existing api-keys secret (if it exists)
+      community.kubernetes.k8s:
+        state: absent
+        kind: Secret
+        name: api-keys
+        namespace: default # Specify namespace
+      ignore_errors: yes # Ignore if secret doesn't exist
+
+    - name: Create api-keys secret from environment variables
+      community.kubernetes.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: api-keys
+            namespace: default # Specify namespace
+          type: Opaque
+          # Use lookup to get env vars; b64encode filter is NOT needed here,
+          # the k8s module handles encoding for stringData.
+          stringData:
+            google_api_key.txt: "{{ lookup('env', 'GOOGLE_API_KEY_SECRET') }}"
+            openai_api_key.txt: "{{ lookup('env', 'OPENAI_API_KEY_SECRET') }}"
+
     - name: Apply PersistentVolumeClaims
       community.kubernetes.k8s:
         state: present

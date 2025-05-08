@@ -706,7 +706,7 @@ class TextToSqlAgent:
         llm_instance: Optional[Union[OpenAI, genai.GenerativeModel]] = None
         try:
             # Reuse logic from llm_interface or centralize LLM creation if preferred
-            if model_name.startswith("gpt-"):
+            if model_name.startswith("gpt-") or model_name.startswith("o3-"):
                 if not os.environ.get("OPENAI_API_KEY"):
                     logging.error(
                         f"Agent {self.agent_id}: OpenAI API key missing for {model_name}."

@@ -1,0 +1,83 @@
+---
+# ansible/provision_gke.yml
+- name: Provision GKE Cluster and Prerequisites on GCP
+  hosts: localhost # Run locally to interact with GCP APIs
+  gather_facts: no
+
+  vars:
+    # --- Required Variables (Pass via --extra-vars or environment variables) ---
+    gcp_project_id: "{{ lookup('env', 'GCP_PROJECT_ID') | default(ansible_env.GCP_PROJECT_ID, true) | default(omit) }}"
+    gcp_zone: "{{ lookup('env', 'GCP_ZONE') | default(ansible_env.GCP_ZONE, true) | default('us-central1-c') }}" # Default zone
+    gcp_region: "{{ gcp_zone[:-2] }}" # Derive region from zone
+    gcp_service_account_file: "{{ lookup('env', 'GCP_SERVICE_ACCOUNT_FILE') | default(ansible_env.GCP_SERVICE_ACCOUNT_FILE, true) | default(omit) }}" # Path to SA key JSON
+
+    # --- Cluster Configuration ---
+    gke_cluster_name: "{{ cluster_name | default('lumenai-cluster') }}"
+    gke_node_count: "{{ node_count | default(1) }}"
+    gke_machine_type: "{{ machine_type | default('e2-medium') }}" # Choose appropriate machine type
+
+    # --- Internal Variables ---
+    required_apis:
+      - compute.googleapis.com
+      - container.googleapis.com
+      - artifactregistry.googleapis.com # Or containerregistry.googleapis.com
+
+  pre_tasks:
+    - name: Check required variables are set
+      ansible.builtin.fail:
+        msg: "Required variable '{{ item }}' is not defined. Please set it via environment variable or --extra-vars."
+      when: vars[item] is none or vars[item] | length == 0
+      loop:
+        - gcp_project_id
+        - gcp_service_account_file
+
+  tasks:
+    - name: Enable required GCP APIs
+      google.cloud.gcp_service_usage_service:
+        project: "{{ gcp_project_id }}"
+        name: "{{ item }}"
+        state: present
+        auth_kind: serviceaccount
+        service_account_file: "{{ gcp_service_account_file }}"
+      loop: "{{ required_apis }}"
+      register: api_enable_status
+      until: api_enable_status is successful # Retry might be needed if enabling takes time
+      retries: 3
+      delay: 10
+
+    # Note: Assuming default VPC network exists. Add network creation tasks if needed.
+    # - name: Create VPC Network (if needed)
+    #   google.cloud.gcp_compute_network:
+    #     name: "your-vpc-name"
+    #     project: "{{ gcp_project_id }}"
+    #     auth_kind: serviceaccount
+    #     service_account_file: "{{ gcp_service_account_file }}"
+    #     state: present
+
+    - name: Provision GKE Cluster
+      google.cloud.gcp_container_cluster:
+        name: "{{ gke_cluster_name }}"
+        location: "{{ gcp_zone }}"
+        initial_node_count: "{{ gke_node_count }}"
+        node_config:
+          machine_type: "{{ gke_machine_type }}"
+          # Add other node config like oauth_scopes if needed
+          # oauth_scopes:
+          #   - https://www.googleapis.com/auth/cloud-platform
+        project: "{{ gcp_project_id }}"
+        auth_kind: serviceaccount
+        service_account_file: "{{ gcp_service_account_file }}"
+        state: present
+      register: gke_cluster_creation
+
+    - name: Display GKE Cluster creation status
+      ansible.builtin.debug:
+        var: gke_cluster_creation
+        verbosity: 1 # Show only when -v is used
+
+    - name: Get GKE cluster credentials for kubectl (optional, useful for immediate testing)
+      ansible.builtin.command:
+        cmd: "gcloud container clusters get-credentials {{ gke_cluster_name }} --zone {{ gcp_zone }} --project {{ gcp_project_id }}"
+      changed_when: false # Command itself doesn't change infra state
+      when: gke_cluster_creation.changed # Only run if cluster was newly created or updated
+      ignore_errors: yes # May fail if gcloud isn't set up exactly right, but cluster exists 

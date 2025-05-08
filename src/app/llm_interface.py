@@ -197,9 +197,9 @@ def _call_llm(llm: LlmType, prompt: str) -> str:
         # --- END NEW ---
 
         if isinstance(llm, OpenAI):
-            # Use LlamaIndex OpenAI predict method (pass string directly)
-            response = llm.predict(prompt)
-            response_text = response.strip()
+            # Use LlamaIndex OpenAI complete method (pass string directly)
+            response = llm.complete(prompt)
+            response_text = response.text.strip()
         elif isinstance(llm, genai.GenerativeModel):
             # Use google-generativeai generate_content
             response = llm.generate_content(prompt)
