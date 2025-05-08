@@ -97,12 +97,16 @@ def test_call_llm_openai():
     mock_llm = MagicMock(spec=OpenAI)
     prompt = "Test prompt"
     expected_response = " OpenAI response "
-    mock_llm.predict.return_value = expected_response
+
+    # New way: Mock the .complete().text attribute access
+    mock_response_object = MagicMock()
+    mock_response_object.text = expected_response
+    mock_llm.complete.return_value = mock_response_object
 
     response = _call_llm(mock_llm, prompt)
 
     assert response == expected_response.strip()
-    mock_llm.predict.assert_called_once_with(prompt)
+    mock_llm.complete.assert_called_once_with(prompt)
 
 def test_call_llm_gemini_success():
     """Test calling _call_llm with a mocked Gemini object (success)."""
@@ -151,13 +155,14 @@ def test_call_llm_api_exception():
     mock_llm = MagicMock(spec=OpenAI)
     prompt = "Test prompt"
     error_message = "API connection error"
-    mock_llm.predict.side_effect = Exception(error_message)
+
+    mock_llm.complete.side_effect = Exception(error_message)
 
     response = _call_llm(mock_llm, prompt)
 
     assert "(Error during LLM call:" in response
     assert error_message in response
-    mock_llm.predict.assert_called_once_with(prompt)
+    mock_llm.complete.assert_called_once_with(prompt)
 
 
 # --- Tests for validate_question --- #
