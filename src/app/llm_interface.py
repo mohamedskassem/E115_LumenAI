@@ -192,6 +192,10 @@ def _call_llm(llm: LlmType, prompt: str) -> str:
     """Calls the appropriate method based on LLM type and returns the text response."""
     response_text = ""
     try:
+        # --- NEW: Log the full prompt at DEBUG level ---
+        logging.debug(f"LLM ({type(llm)}) - Full Prompt:\n{prompt}")
+        # --- END NEW ---
+
         if isinstance(llm, OpenAI):
             # Use LlamaIndex OpenAI predict method (pass string directly)
             response = llm.predict(prompt)
