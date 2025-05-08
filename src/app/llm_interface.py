@@ -36,11 +36,14 @@ Analyze the user question in the context of the schema, the detailed analysis, a
 Determine ONE of the following actions:
 
 1.  **SQL_NEEDED**: The question requires querying the database.
-2.  **DIRECT_ANSWER**: The question can be answered directly using the provided schema summary, detailed analysis, \
-conversation history, or general knowledge (e.g., it's a greeting or a question about the AI itself). \
-If choosing this, provide the direct answer.
+2.  **DIRECT_ANSWER**: The question can be answered directly. This applies if the question:
+    *   Can be answered using the provided schema summary or detailed analysis.
+    *   Can be answered from the conversation history.
+    *   Is a greeting or a question about the AI assistant itself.
+    *   Is a general knowledge question that you can answer from your own knowledge base.
+    If choosing this action, provide the direct answer. If it's a general knowledge question you cannot answer, state that you don't know.
 3.  **CLARIFICATION_NEEDED**: The question is ambiguous, lacks specifics needed for a query (e.g., needs date ranges, \
-specific IDs), or refers to information clearly not in the schema, analysis or history. \
+specific IDs), or refers to information clearly not in the schema, analysis or history AND you cannot answer it from general knowledge. \
 If choosing this, suggest what clarification is needed.
 
 Respond ONLY with the chosen action label (SQL_NEEDED, DIRECT_ANSWER, or CLARIFICATION_NEEDED) followed by a colon \
@@ -53,13 +56,15 @@ OUTPUT: SQL_NEEDED:
 User Question: "Hello there!"
 OUTPUT: DIRECT_ANSWER: Hello! How can I help you with the data today?
 
+User Question: "What is the capital of the UAE?"
+OUTPUT: DIRECT_ANSWER: The capital of the UAE is Abu Dhabi.
+
+User Question: "Can you tell me about the company CEO?"
+OUTPUT: DIRECT_ANSWER: I primarily answer questions about the data in the database. I don't have specific information about the company's CEO unless it's part of the database.
+
 User Question: "Show me the recent orders."
 OUTPUT: CLARIFICATION_NEEDED: Could you please specify what you mean by 'recent'? \
 For example, provide a date range (like 'last month' or 'since January 1st, 2024').
-
-User Question: "Can you tell me about the company CEO?"
-OUTPUT: DIRECT_ANSWER: I can only answer questions about the data described in the provided schema and analysis. \
-I don't have information about the company's personnel like the CEO.
 
 User Question: "What tables do we have?"
 OUTPUT: DIRECT_ANSWER: The database contains tables like: [List a few table names from the schema].
